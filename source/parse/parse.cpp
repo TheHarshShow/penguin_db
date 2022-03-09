@@ -34,6 +34,11 @@ void processCommand(const std::string& command){
 			std::cout << "create table instruction observed" << std::endl;
 		}
 		Table::createTable(tokens);
+	} else if(tokens.size()>2 && tokens[0] == "insert" && tokens[1] == "into"){
+		if(DEBUG == true){
+			std::cout << "insert into instruction observed" << std::endl;
+		}
+		Table::insertIntoTable(tokens);
 	}
 
 }

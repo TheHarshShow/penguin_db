@@ -7,6 +7,7 @@
 class Table {
 public:
     static void createTable(const std::vector<std::string>& tokens);
+    static void insertIntoTable(const std::vector<std::string>& tokens);
 };
 
 #endif // TABLE_H

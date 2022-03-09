@@ -1,6 +1,7 @@
 #include <utility>
 #include <filesystem>
 #include <string.h>
+#include <set>
 #include "table.h"
 #include "../database/database.h"
 #include "../properties.h"
@@ -15,8 +16,10 @@
 bool validateTableName(const std::string& name);
 std::pair<bool, std::string> validateAndProcessColumns(std::vector< std::vector< std::string > >& columns);
 bool validateColumnName(const std::string& name);
-bool saveTable(const std::string &tableString, const std::string& tableName);
+bool saveTable(const std::string &tableString, const std::string& tableName, const std::vector< std::vector< std::string > >& columns);
 uint32_t getRowSize(const std::vector< std::vector< std::string > > &columns);
+std::vector< std::string > getColumnValues(const std::vector<std::string>& tokens, int startIndex, int endIndex);
+bool verifyInsertedColumns(const std::vector< std::string >& values, const std::vector< std::vector< std::string > >& columns);
 
 void Table::createTable(const std::vector<std::string>& tokens){
     std::string tableName = tokens[2];
@@ -27,7 +30,8 @@ void Table::createTable(const std::vector<std::string>& tokens){
     }
 
     if(!validateTableName(tableName)){
-        Logger::logError("Table name is not valid. Name must be an alphanumeric string between 4 and 16 characters long (inclusive). Also, the first character cannot be a number.");
+        Logger::logError("Table name is not valid. Name must be an alphanumeric string between 4 and \
+16 characters long (inclusive). Also, the first character cannot be a number.");
         return;
     }
 
@@ -81,8 +85,9 @@ void Table::createTable(const std::vector<std::string>& tokens){
     if(DEBUG == true){
         std::cout << "Row size: " << rowSize << std::endl;
     }
-
-    if(rowSize > PAGE_SIZE){
+    
+    // First 4 bytes of page represent total used bytes of page
+    if(rowSize + 4 > PAGE_SIZE){
         Logger::logError("Every row must fit inside a single page. Change the page size if you want to process larger rows.");
         return;
     }
@@ -93,14 +98,183 @@ void Table::createTable(const std::vector<std::string>& tokens){
      * 
      */
     tableString = tableName + tableString;
-    if(!saveTable(tableString, tableName)){
+    if(!saveTable(tableString, tableName, columns)){
         Logger::logError("Unable to write table info");
         return;
     }
-    Database::cacheTableInfo(tableName, columns);
-
 
     return;
+}
+
+void Table::insertIntoTable(const std::vector<std::string>& tokens){
+    std::string tableName = tokens[2];
+    
+    if(!Database::isDatabaseChosen()){
+        Logger::logError("No database chosen");
+        return;
+    }
+
+    if(!Database::checkIfTableExists(tableName)){
+        Logger::logError("The specified table doesn't exist");
+        return;
+    }
+
+    if(tokens[3] != "values"){
+        Logger::logError("Currently only ordered exhaustive insert supported");
+        return;
+    }
+
+    if(tokens[4] !="(" || tokens[tokens.size()-1] != ")"){
+        Logger::logError("Parenthesis not found at the correct positions");
+        return;
+    }
+
+    std::string dbName = Database::getCurrentDatabase();
+
+    const std::vector< std::vector< std::string > >& columns = Database::getColumnsOfTable(tableName);
+    std::vector< std::string > columnValues = getColumnValues(tokens, 4, tokens.size()-1);
+
+    if(columns.size() != columnValues.size()){
+        Logger::logError("Incorrect number of arguments. Required columns: "+std::to_string(columns.size()));
+        return;
+    }
+
+    if(!verifyInsertedColumns(columnValues, columns)){
+        Logger::logError("Column data type mismatch");
+        return;
+    }
+
+    int fd = open((DATABASE_DIRECTORY + dbName + "/data/table__" + tableName).c_str(), O_RDWR);
+    if(fd < 0){
+        Logger::logError("Can't open table data file");
+        close(fd);
+        return;
+    }
+    
+    readFromFile(fd,TABLE_METADATA_PAGE_BUFFER_A);
+
+    uint64_t totBytes, totPages, nextId;
+    memcpy(&totBytes, TABLE_METADATA_PAGE_BUFFER_A, sizeof(totBytes));
+    memcpy(&totPages, TABLE_METADATA_PAGE_BUFFER_A + sizeof(totBytes), sizeof(totPages));
+    memcpy(&nextId, TABLE_METADATA_PAGE_BUFFER_A + sizeof(totBytes) + sizeof(totPages), sizeof(nextId));
+
+    memset(WORKBUFFER_A, 0, PAGE_SIZE);
+    memcpy(WORKBUFFER_A, &nextId, sizeof(nextId));
+
+    uint32_t ptr = sizeof(nextId);
+
+    for(int i=0; i<columnValues.size(); i++){
+        std::string bytes = getBytesFromValue(columnValues[i], columns[i][1]);
+        memcpy(WORKBUFFER_A + ptr, bytes.c_str(), bytes.length());
+        ptr+=bytes.length();
+
+        if(DEBUG == true){
+            std::cout << "BYTES: " << bytes.length() << std::endl;
+        }
+
+    }
+
+    uint32_t rowSize = getRowSize(columns);
+    if(ptr != rowSize){
+        if(DEBUG == true){
+            std::cout << ptr << " " << rowSize << std::endl;
+        }
+        Logger::logError("Row size doesn't match");
+        return;
+    }
+
+    // Read last page
+    lseek(fd, totPages*PAGE_SIZE, SEEK_SET);
+    readFromFile(fd, CURRENT_TABLE_PAGE_BUFFER_A);
+
+    uint32_t totPageBytes;
+    memcpy(&totPageBytes, CURRENT_TABLE_PAGE_BUFFER_A, sizeof(totPageBytes));
+
+    if(DEBUG == true){
+        std::cout << "Tot Bytes: " << totBytes << " Tot Pages: " << totPages << " Next ID: " << nextId << std::endl;
+    }
+
+    if(totPageBytes + rowSize > PAGE_SIZE){
+        // We need a new page
+        totPageBytes = rowSize;
+        memset(CURRENT_TABLE_PAGE_BUFFER_A, 0, PAGE_SIZE);
+        memcpy(CURRENT_TABLE_PAGE_BUFFER_A, &totPageBytes, sizeof(totPageBytes));
+        memcpy(CURRENT_TABLE_PAGE_BUFFER_A + sizeof(totPageBytes), WORKBUFFER_A, rowSize);
+        totPages++;
+        nextId++;
+        totBytes += rowSize;
+    } else {
+        for(int i=sizeof(totPageBytes); i + rowSize - 1<PAGE_SIZE; i+=rowSize){
+            uint64_t currentId;
+            memcpy(&currentId, CURRENT_TABLE_PAGE_BUFFER_A+i, sizeof(currentId));
+            if(currentId == 0){
+                //Empty position
+                memcpy(CURRENT_TABLE_PAGE_BUFFER_A + i, WORKBUFFER_A, rowSize);
+                totPageBytes += rowSize;
+                nextId++;
+                totBytes += rowSize;
+                memcpy(CURRENT_TABLE_PAGE_BUFFER_A, &totPageBytes, sizeof(totPageBytes));
+                break;
+            }
+        }
+    }
+
+    lseek(fd, totPages*PAGE_SIZE, SEEK_SET);
+    writeToFile(fd, CURRENT_TABLE_PAGE_BUFFER_A);
+
+    memcpy(TABLE_METADATA_PAGE_BUFFER_A, &totBytes, sizeof(totBytes));
+    memcpy(TABLE_METADATA_PAGE_BUFFER_A + sizeof(totBytes), &totPages, sizeof(totPages));
+    memcpy(TABLE_METADATA_PAGE_BUFFER_A + sizeof(totBytes) + sizeof(totPages), &nextId, sizeof(nextId));
+
+    lseek(fd, 0, SEEK_SET);
+    writeToFile(fd, TABLE_METADATA_PAGE_BUFFER_A);
+
+    Logger::logSuccess("Successfully inserted row");
+
+    std::cout << "Tot Bytes in table: " << totBytes << std::endl;
+    std::cout << "Tot Pages in Table: " << totPages << std::endl;
+    std::cout << "Next ID: " << nextId << std::endl;
+
+    close(fd);
+
+}
+
+/**
+ * @brief Get the column values from an insert command
+ * 
+ * @param tokens insert command tokens
+ * @param startIndex index of first parentheses
+ * @param endIndex index of final parenthesis
+ * @return std::vector<std::string> list of column values
+ */
+std::vector< std::string > getColumnValues(const std::vector<std::string>& tokens, int startIndex, int endIndex){
+    std::vector< std::string > values;
+    for(int i=startIndex+1; i<endIndex; i++){
+        if(tokens[i] != ","){
+            values.push_back(tokens[i]);
+        }
+    }
+    return values;
+}
+
+/**
+ * @brief Check if inserted values match column types
+ * 
+ * @param values insert values
+ * @param columns Info on the columns
+ * @return true if they match
+ * @return false otherwise
+ */
+bool verifyInsertedColumns(const std::vector< std::string >& values, const std::vector< std::vector< std::string > >& columns){
+    if(values.size() != columns.size()){
+        return false;
+    }
+    for(int i=0; i<values.size(); i++){
+        if(!matchType(values[i], columns[i][1])){
+            return false;
+        }
+    }
+    return true;
 }
 
 bool validateTableName(const std::string& name){
@@ -121,13 +295,20 @@ bool validateTableName(const std::string& name){
 }
 
 std::pair<bool, std::string> validateAndProcessColumns(std::vector< std::vector< std::string > >& columns){
+    std::set< std::string > columnNames;
     for(int i=0;i<columns.size();i++){
+        if(columnNames.find(columns[i][0]) != columnNames.end()){
+            return std::make_pair(false, "Duplicate column names found");
+        }
+        columnNames.insert(columns[i][0]);
+
         // Remove later when adding UNIQUE DEFAULT etc.
         if(columns[i].size()>2){
             return std::make_pair(false, "Column has too many arguments");
         }
         if(!validateColumnName(columns[i][0])){
-            return std::make_pair(false, "Column name invalid. Name must an alphanumeric string be between 2 and 16 characters (inclusive). Also, the first character cannot be a number.");
+            return std::make_pair(false, "Column name invalid. Name must an alphanumeric string be \
+between 2 and 16 characters (inclusive). Also, the first character cannot be a number.");
         }
         if(getTypeFromString(columns[i][1]) == TYPE::UNSUPPORTED){
             return std::make_pair(false, "Column type not supported.");
@@ -169,19 +350,17 @@ bool validateColumnName(const std::string& name){
     return true;
 }
 
-bool saveTable(const std::string &tableString, const std::string& tableName){
-    
-    /**
-     * @brief If the line is too long, it won't fit into the read buffer
-     */
-    if(tableString.length() > PAGE_SIZE){
-        return false;
-    }
+bool saveTable(const std::string &tableString, const std::string& tableName, const std::vector< std::vector< std::string > >& columns){
 
     std::string currentDatabase = Database::getCurrentDatabase();
 
-    // Create tables file
-    int fd = open((DATABASE_DIRECTORY+currentDatabase+"/tables").c_str(), O_WRONLY | O_APPEND);
+    // Write to table metadata file
+    /**
+     * @brief Table metadata file format:
+     * 1) first 8 bytes is the next table id
+     * 2) subsequent lines store table metadata
+     */
+    int fd = open((DATABASE_DIRECTORY+currentDatabase+"/tables").c_str(), O_RDWR);
     if(DEBUG == true){
         std::cout<<"File Descriptor: "<<fd<<std::endl;
     }
@@ -190,9 +369,35 @@ bool saveTable(const std::string &tableString, const std::string& tableName){
         return false;
     }
 
-    strcpy(WRITE_BUFFER, tableString.c_str());
+    //Update next id
+    read(fd,READ_BUFFER,8);
+    uint64_t nextTableId;
+    memcpy(&nextTableId, READ_BUFFER, 8);
+    
+    if(DEBUG == true){
+        std::cout << "Next Table ID: " << nextTableId << std::endl;
+    }
 
-    write(fd,WRITE_BUFFER,tableString.length());
+    std::string _tableString = std::to_string(nextTableId) + " " + tableString;
+    /**
+     * @brief If the line is too long, it won't fit into the read buffer
+     */
+    if(tableString.length() > PAGE_SIZE){
+        close(fd);
+        return false;
+    }
+
+    Database::cacheTableInfo(tableName, columns, std::to_string(nextTableId));
+
+    lseek(fd,0,SEEK_END);
+    strcpy(WRITE_BUFFER, _tableString.c_str());
+    write(fd,WRITE_BUFFER, _tableString.length());
+
+    nextTableId++;
+    memcpy(WRITE_BUFFER, &nextTableId, 8);
+    lseek(fd,0,SEEK_SET);
+
+    write(fd,WRITE_BUFFER,8);
 
     close(fd);
 
@@ -215,17 +420,18 @@ bool saveTable(const std::string &tableString, const std::string& tableName){
     uint64_t totBytes = 0;
     uint64_t totPages = 1;
     uint64_t nextId = 1;
-    memcpy(WRITE_BUFFER, &totBytes, sizeof(totBytes));
-    memcpy(WRITE_BUFFER+sizeof(totBytes), &totPages, sizeof(totBytes));
-    memcpy(WRITE_BUFFER + sizeof(totBytes) + sizeof(totPages), &nextId, sizeof(totBytes));
 
-    write(fd,WRITE_BUFFER,PAGE_SIZE);
-    memset(WRITE_BUFFER,0,PAGE_SIZE);
+    memcpy(WORKBUFFER_A, &totBytes, sizeof(totBytes));
+    memcpy(WORKBUFFER_A + sizeof(totBytes), &totPages, sizeof(totBytes));
+    memcpy(WORKBUFFER_A + sizeof(totBytes) + sizeof(totPages), &nextId, sizeof(totBytes));
+    writeToFile(fd,WORKBUFFER_A);
 
+    memset(WORKBUFFER_A,0,PAGE_SIZE);
     lseek(fd,PAGE_SIZE,SEEK_SET);
-    write(fd,WRITE_BUFFER,PAGE_SIZE);
+    writeToFile(fd,WORKBUFFER_A);
 
     close(fd);
+
     Logger::logSuccess("Successfully created table with name: "+ tableName);
 
     return true;

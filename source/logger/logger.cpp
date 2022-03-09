@@ -1,12 +1,13 @@
-#include "logger.h"
 #include <iostream>
+#include "../formatter/formatter.h"
+#include "logger.h"
 
 void Logger::logSuccess(std::string successString){
-    std::cout << "Success: " << successString << std::endl;
+    std::cout << Formatter::bold_green_on << "Success: " << Formatter::off << successString << std::endl;
 }
 
 void Logger::logError(std::string errorString){
-    std::cout << "ERROR: " << errorString << std::endl;
+    std::cout << Formatter::bold_red_on << "ERROR: " << Formatter::off << errorString << std::endl;
 }
 
 void Logger::logDebug(std::string debugString){

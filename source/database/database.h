@@ -40,9 +40,11 @@ public:
      * @param tableName name of the table for which mapping is to be saved
      * @param columns the info of the columns of this table
      */
-    static void cacheTableInfo(const std::string& tableName, const std::vector< std::vector< std::string >>& columns);
+    static void cacheTableInfo(const std::string& tableName, const std::vector< std::vector< std::string >>& columns, const std::string& id);
 
     static bool checkIfTableExists(const std::string& tableName);
+
+    static const std::vector< std::vector< std::string > >& getColumnsOfTable(const std::string& tableName);
 };
 
 #endif // DATABASE_H

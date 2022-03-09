@@ -1,3 +1,4 @@
+#include <string.h>
 #include "type.h"
 
 bool verifyStringType(const std::string& type);
@@ -73,4 +74,99 @@ bool verifyStringType(const std::string& type){
     }
 
     return true;
+}
+
+bool matchType(const std::string& value, const std::string& type){
+    TYPE _type = getTypeFromString(type);
+    uint32_t maxLen;
+    switch(_type){
+        case TYPE::INT:
+            if(value[0] != '-' && (value[0] < '0' || value[0] > '9')){
+                return false;
+            }
+            for(int i=1; i < value.size(); i++){
+                if(value[i] < '0' || value[i] > '9'){
+                    return false;
+                }
+            }
+            return true;
+        case TYPE::CHAR:
+            if(value[0] != '\'' || value[value.size()-1] != '\''){
+                return false;
+            }
+            if(value.size()>4 || value.size()<3){
+                return false;
+            }
+            /**
+             * @brief Process chars like \n, \r etc later
+             */
+            if(value.size() == 4){
+                return false;
+            }
+            if(value.size()==3){
+                return true;
+            }
+        case TYPE::FLOAT:
+            // Unsophisticated solution. Probably will be replaced later
+            try {
+                std::stod(value);
+                return true;
+            } catch(...) {
+                return false;
+            }
+        case TYPE::STRING:
+            if(value[0] != '\'' || value[value.size()-1] != '\''){
+                return false;
+            }
+            maxLen = getStringLength(type);
+            if(value.length() > maxLen + 2){
+                return false;
+            }
+            return true;
+        default:
+            return false;
+    }
+}
+
+std::string getBytesFromValue(const std::string& value, const std::string& type){
+    TYPE _type = getTypeFromString(type);
+    std::string finalBytes, padding;
+    uint32_t maxLen, reqPadding;
+    uint64_t intVal;
+    double db;
+    switch(_type){
+        case TYPE::INT:
+            intVal = std::stoll(value);
+            char intBytes[9];
+            memcpy(intBytes, &intVal, 8);
+            for(int i=0;i<8;i++){
+                finalBytes += intBytes[i];
+            }
+            return finalBytes;
+        case TYPE::FLOAT:
+            db = std::stod(value);
+            char floatBytes[9];
+            memcpy(floatBytes, &db, 8);
+            for(int i=0;i<8;i++){
+                finalBytes += floatBytes[i];
+            }
+            return finalBytes;
+        case TYPE::CHAR:
+            /**
+             * @todo replace when adding support for \n etc.
+             */
+            finalBytes += value[1];
+            return finalBytes;
+        case TYPE::STRING:
+            maxLen = getStringLength(type);
+            finalBytes = value.substr(1,value.size()-2);
+            reqPadding = maxLen - finalBytes.length();
+            for(int i=0; i < reqPadding; i++){
+                padding+=(char)0;
+            }
+            finalBytes = padding + finalBytes;
+            return finalBytes;
+        default:
+            return "";
+    }
 }

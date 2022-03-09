@@ -1,6 +1,7 @@
 #include <string>
 #include <filesystem>
 #include <map>
+#include <string.h>
 #include <algorithm>
 #include "database.h"
 #include "../properties.h"
@@ -17,6 +18,7 @@ bool loadTables(const std::string& dbName);
 
 static std::string CURRENT_DATABASE = "NUL";
 static std::map< std::string, std::vector< std::vector < std::string > > > currentTables;
+static std::map< std::string, std::string > tableIds;
 
 void Database::createDatabase(const std::vector<std::string>& tokens){
     if(tokens.size()!=3){
@@ -55,6 +57,7 @@ void Database::useDatabase(const std::vector<std::string>& tokens){
 
     CURRENT_DATABASE = dbName;
     currentTables.clear();
+    tableIds.clear();
 
     /**
      * @todo LOAD TABLES
@@ -67,6 +70,7 @@ void Database::useDatabase(const std::vector<std::string>& tokens){
 
     if(DEBUG == true){
         for(auto u:currentTables){
+            std::cout << tableIds[u.first] << " ";
             std::cout << u.first << ": ";
             for(int i=0;i<u.second.size();i++){
                 for(int j=0;j<u.second[i].size();j++){
@@ -86,8 +90,9 @@ std::string Database::getCurrentDatabase(){
     return CURRENT_DATABASE;
 }
 
-void Database::cacheTableInfo(const std::string& tableName, const std::vector< std::vector< std::string >>& columns){
+void Database::cacheTableInfo(const std::string& tableName, const std::vector< std::vector< std::string >>& columns, const std::string& id){
     currentTables[tableName] = columns;
+    tableIds[tableName] = id;
 }
 
 bool Database::isDatabaseChosen(){
@@ -96,6 +101,10 @@ bool Database::isDatabaseChosen(){
 
 bool Database::checkIfTableExists(const std::string& tableName){
     return (currentTables.find(tableName) != currentTables.end());
+}
+
+const std::vector< std::vector< std::string > >& Database::getColumnsOfTable(const std::string& tableName){
+    return currentTables[tableName];
 }
 
 bool validateDatabaseName(const std::string& name){
@@ -120,11 +129,12 @@ void saveDatabase(const std::string &dbName){
 		std::filesystem::create_directories(DATABASE_DIRECTORY+dbName);
 		std::filesystem::create_directories(DATABASE_DIRECTORY+dbName+"/data"); // To store database data
 
-		// Create tables file
-		int fd = creat((DATABASE_DIRECTORY+dbName+"/tables").c_str(),S_IRUSR|S_IWUSR);
+		// Create tables file. Initially it only stores next table id.
+		int fd = open((DATABASE_DIRECTORY+dbName+"/tables").c_str(),O_RDWR | O_CREAT,S_IRUSR|S_IWUSR);
 		if(DEBUG == true){
 			std::cout<<"File Descriptor: "<<fd<<std::endl;
 		}
+
 		if(fd<0){
 			Logger::logError("Unable to create tables file");
 			close(fd);
@@ -132,6 +142,10 @@ void saveDatabase(const std::string &dbName){
 			std::filesystem::remove_all(DATABASE_DIRECTORY+dbName);
 			return;
 		}
+        uint64_t nextTableId = 1;
+        memcpy(WRITE_BUFFER,&nextTableId,8);
+        write(fd,WRITE_BUFFER,8);
+
 		close(fd);
 
         Logger::logSuccess("Database with name "+dbName+" created");
@@ -153,14 +167,24 @@ void saveDatabase(const std::string &dbName){
  * @param currentLine Line giving table description read from the tables file
  */
 void processTableLine(const std::string& currentLine){
+    std::string id;
     std::string tableName;
+
     int i;
     for(i=0; i<currentLine.size(); i++){
+        if(currentLine[i]==' '){
+            i++;
+            break;
+        }
+        id+=currentLine[i];
+    }
+    for(; i<currentLine.size(); i++){
         if(currentLine[i]==' '){
             break;
         }
         tableName+=currentLine[i];
     }
+
     std::vector< std::string > currentColumn;
     std::vector< std::vector< std::string > > columns;
     std::string word;
@@ -182,7 +206,7 @@ void processTableLine(const std::string& currentLine){
         }
     }
 
-    currentTables[tableName] = columns;
+    Database::cacheTableInfo(tableName,columns,id);
 
 }
 
@@ -201,7 +225,7 @@ bool loadTables(const std::string& dbName){
         return false;
     }
     
-    uint32_t prevSeek = 0;
+    uint32_t prevSeek = 8; // nextId takes 8 bytes.
     uint32_t totRead = 1; // Arbitrary definition
 
     while(totRead){
