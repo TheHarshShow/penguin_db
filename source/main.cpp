@@ -2,9 +2,10 @@
 #include "version/version.h"
 #include "properties.h"
 #include "parse/parse.h"
+#include "formatter/formatter.h"
 
 int main(){
-    std::cout << "Penguin DB Version " << VERSION << "\n" << std::endl;
+    std::cout << Formatter::bold_on << "Penguin DB " << Formatter::off << "Version " << VERSION << "\n" << std::endl;
 
     while(true){
         std::cout << "penguin_db > ";

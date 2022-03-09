@@ -1,6 +1,7 @@
 #include <vector>
 #include "parse.h"
 #include "../database/database.h"
+#include "../table/table.h"
 
 void stripString(std::string &s);
 std::vector<std::string> generateTokens(const std::string& command);
@@ -23,7 +24,17 @@ void processCommand(const std::string& command){
             std::cout << "\ncreate database instruction observed" << std::endl;
         }
         Database::createDatabase(tokens);
-    }
+    } else if(tokens.size()>2 && tokens[0] == "use" && tokens[1] == "database"){
+		if(DEBUG == true){
+			std::cout << "\nuse database instruction observed" << std::endl;
+		}
+		Database::useDatabase(tokens);
+	} else if(tokens.size()>2 && tokens[0] == "create" && tokens[1] == "table"){
+		if(DEBUG == true){
+			std::cout << "create table instruction observed" << std::endl;
+		}
+		Table::createTable(tokens);
+	}
 
 }
 
