@@ -8,7 +8,7 @@ int main(){
     std::cout << Formatter::bold_on << "Penguin DB " << Formatter::off << "Version " << VERSION << "\n" << std::endl;
 
     while(true){
-        std::cout << "penguin_db > ";
+        std::cout << Formatter::bold_on << "penguin_db > " << Formatter::off;
         std::string command;
         getline(std::cin, command, ';');
         

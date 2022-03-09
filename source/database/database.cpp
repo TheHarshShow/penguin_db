@@ -13,57 +13,10 @@
 
 bool validateDatabaseName(const std::string& name);
 void saveDatabase(const std::string &dbName);
+bool loadTables(const std::string& dbName);
 
 static std::string CURRENT_DATABASE = "NUL";
 static std::map< std::string, std::vector< std::vector < std::string > > > currentTables;
-
-/**
- * @brief Caches a single table line read from the tables file
- * 
- * @param currentLine Line giving table description read from the tables file
- */
-void processTableLine(const std::string& currentLine){
-    
-}
-
-bool loadTables(const std::string& dbName){
-    int fd = open((DATABASE_DIRECTORY + dbName + "/tables").c_str(), O_RDONLY);
-    if(fd<0){
-        close(fd);
-        Logger::logError("Unable to load table info");
-        return false;
-    }
-    
-    uint32_t prevSeek = 0;
-    uint32_t totRead = 1; // Arbitrary definition
-
-    while(totRead){
-
-        uint32_t additionalSeek = 0;
-
-        lseek(fd, prevSeek, SEEK_SET);
-        totRead = read(fd,READ_BUFFER,PAGE_SIZE);
-
-        std::string currentLine;
-        for(int i=0; i < std::min(totRead,PAGE_SIZE); i++){
-            if(READ_BUFFER[i] != '\n'){
-                currentLine+=READ_BUFFER[i];
-            } else {
-
-                processTableLine(currentLine);
-
-                additionalSeek = i+1;
-                currentLine = "";
-            }
-        }
-
-        prevSeek += additionalSeek;
-
-    }
-
-    close(fd);
-    return true;
-}
 
 void Database::createDatabase(const std::vector<std::string>& tokens){
     if(tokens.size()!=3){
@@ -107,7 +60,23 @@ void Database::useDatabase(const std::vector<std::string>& tokens){
      * @todo LOAD TABLES
      * 
      */
-    loadTables(dbName);
+    if(!loadTables(dbName)){
+        Logger::logError("Unable to load table metadata");
+        return;
+    }
+
+    if(DEBUG == true){
+        for(auto u:currentTables){
+            std::cout << u.first << ": ";
+            for(int i=0;i<u.second.size();i++){
+                for(int j=0;j<u.second[i].size();j++){
+                    std::cout << u.second[i][j] << " ";
+                }
+                std::cout << "| ";
+            }
+            std::cout << std::endl;
+        }
+    }
 
     Logger::logSuccess("current database: "+dbName);
 
@@ -176,4 +145,89 @@ void saveDatabase(const std::string &dbName){
 		std::filesystem::remove_all(DATABASE_DIRECTORY+dbName);
 		return;
 	}
+}
+
+/**
+ * @brief Caches a single table line read from the tables file
+ * 
+ * @param currentLine Line giving table description read from the tables file
+ */
+void processTableLine(const std::string& currentLine){
+    std::string tableName;
+    int i;
+    for(i=0; i<currentLine.size(); i++){
+        if(currentLine[i]==' '){
+            break;
+        }
+        tableName+=currentLine[i];
+    }
+    std::vector< std::string > currentColumn;
+    std::vector< std::vector< std::string > > columns;
+    std::string word;
+
+    for(;i<currentLine.size();i++){
+        if(currentLine[i] == '$'){
+            // Column end
+            currentColumn.push_back(word);
+            columns.push_back(currentColumn);
+            currentColumn.clear();
+            word = "";
+        } else if(currentLine[i] == ' '){
+            if(word.size()){ 
+                currentColumn.push_back(word);
+                word = "";
+            }
+        } else {
+            word+=currentLine[i];
+        }
+    }
+
+    currentTables[tableName] = columns;
+
+}
+
+/**
+ * @brief Load table metadata of a database into the in memory cache
+ * 
+ * @param dbName name of a database
+ * @return true if it worked
+ * @return false if it didn't work
+ */
+bool loadTables(const std::string& dbName){
+    int fd = open((DATABASE_DIRECTORY + dbName + "/tables").c_str(), O_RDONLY);
+    if(fd<0){
+        close(fd);
+        Logger::logError("Unable to load table info");
+        return false;
+    }
+    
+    uint32_t prevSeek = 0;
+    uint32_t totRead = 1; // Arbitrary definition
+
+    while(totRead){
+
+        uint32_t additionalSeek = 0;
+
+        lseek(fd, prevSeek, SEEK_SET);
+        totRead = read(fd,READ_BUFFER,PAGE_SIZE);
+
+        std::string currentLine;
+        for(int i=0; i < std::min(totRead,PAGE_SIZE); i++){
+            if(READ_BUFFER[i] != '\n'){
+                currentLine+=READ_BUFFER[i];
+            } else {
+
+                processTableLine(currentLine);
+
+                additionalSeek = i+1;
+                currentLine = "";
+            }
+        }
+
+        prevSeek += additionalSeek;
+
+    }
+
+    close(fd);
+    return true;
 }

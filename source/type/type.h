@@ -12,5 +12,6 @@ enum class TYPE {
 
 TYPE getTypeFromString(const std::string type);
 uint32_t getStringLength(const std::string& type);
+uint32_t getTypeSize(const std::string& type);
 
 #endif // TYPE_H

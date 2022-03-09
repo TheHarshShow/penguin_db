@@ -45,6 +45,24 @@ uint32_t getStringLength(const std::string& type){
     return stoi(lengthString);
 }
 
+uint32_t getTypeSize(const std::string& type){
+    TYPE _type = getTypeFromString(type);
+    switch(_type){
+        case TYPE::INT:
+            return 8;
+        case TYPE::FLOAT:
+            return 8;
+        case TYPE::CHAR:
+            return 1;
+        case TYPE::STRING:
+            return getStringLength(type);
+        case TYPE::UNSUPPORTED:
+            return 0;
+        default:
+            return 0;
+    }
+}
+
 bool verifyStringType(const std::string& type){
     if(type[6]!='[' || type[type.size()-1]!=']'){
         return false;
