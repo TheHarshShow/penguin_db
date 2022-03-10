@@ -1,4 +1,5 @@
 #include <string.h>
+#include <iostream>
 #include "type.h"
 
 bool verifyStringType(const std::string& type);
@@ -132,7 +133,7 @@ std::string getBytesFromValue(const std::string& value, const std::string& type)
     TYPE _type = getTypeFromString(type);
     std::string finalBytes, padding;
     uint32_t maxLen, reqPadding;
-    uint64_t intVal;
+    int64_t intVal;
     double db;
     switch(_type){
         case TYPE::INT:
@@ -166,6 +167,38 @@ std::string getBytesFromValue(const std::string& value, const std::string& type)
             }
             finalBytes = padding + finalBytes;
             return finalBytes;
+        default:
+            return "";
+    }
+}
+
+std::string getValueFromBytes(char buffer[], const std::string& type, int start, int end){
+    TYPE _type = getTypeFromString(type);
+
+    int64_t intValue;
+    std::string returnValue;
+    double db;
+    switch(_type){
+        case TYPE::INT:
+            memcpy(&intValue, buffer + start, 8);
+            return std::to_string(intValue);
+        case TYPE::CHAR:
+            returnValue += '\'';
+            returnValue += buffer[start];
+            returnValue += '\'';
+            return returnValue;
+        case TYPE::FLOAT:
+            memcpy(&db, buffer + start, 8);
+            return std::to_string(db);
+        case TYPE::STRING:
+            returnValue += '\'';
+            for(int i=start; i<end; i++){
+                // Add only if not padding byte
+                if(buffer[i] != (char)0)
+                    returnValue+=buffer[i];
+            }
+            returnValue += '\'';
+            return returnValue;
         default:
             return "";
     }

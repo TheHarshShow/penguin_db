@@ -18,5 +18,5 @@ extern char WORKBUFFER_D[];
  * @note For now, metadata files don't use these functions. metadata files are and read directly because of smaller expected size.
  */
 
-void writeToFile(int fd, char BUFFER[], int totWrite = PAGE_SIZE);
-void readFromFile(int fd, char BUFFER[], int totRead = PAGE_SIZE);
+int32_t writeToFile(int fd, char BUFFER[], int totWrite = PAGE_SIZE);
+int32_t readFromFile(int fd, char BUFFER[], int totRead = PAGE_SIZE);

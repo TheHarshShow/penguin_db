@@ -2,14 +2,17 @@
 #include <filesystem>
 #include <string.h>
 #include <set>
+#include <map>
 #include "table.h"
 #include "../database/database.h"
 #include "../properties.h"
 #include "../logger/logger.h"
 #include "../type/type.h"
 #include "../buffers/buffers.h"
+#include "../formatter/formatter.h"
 
 // File system calls
+#include <sys/types.h>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -20,6 +23,46 @@ bool saveTable(const std::string &tableString, const std::string& tableName, con
 uint32_t getRowSize(const std::vector< std::vector< std::string > > &columns);
 std::vector< std::string > getColumnValues(const std::vector<std::string>& tokens, int startIndex, int endIndex);
 bool verifyInsertedColumns(const std::vector< std::string >& values, const std::vector< std::vector< std::string > >& columns);
+std::pair< bool, std::string > saveRow(const std::string& tableName, const std::vector< std::vector< std::string > >& columns, const std::vector< std::string >& columnValues);
+int verifyConditions(char rowBuffer[], const std::vector< std::vector< std::string > >& columns,const std::vector<condition>& conditions, uint32_t rowSize);
+void printQuery(int fd, uint32_t rowSize, const std::vector< std::vector< std::string > >& columns);
+condition getCondition(const std::vector< std::string >& currentComparison);
+
+COMPARISON stringToComparison(const std::string& comp){
+    if(comp == "=="){
+        return COMPARISON::EQUAL;
+    } else if(comp == ">"){
+        return COMPARISON::GREATER;    
+    } else if(comp == "<"){
+        return COMPARISON::LESS;
+    } else if(comp == "<="){
+        return COMPARISON::L_EQUAL;
+    } else if(comp == ">="){
+        return COMPARISON::G_EQUAL;
+    }
+    return COMPARISON::INVALID;
+}
+
+bool isComparisonValid(COMPARISON expected, COMPARISON obtained){
+    if(expected == COMPARISON::G_EQUAL){
+        if(obtained == COMPARISON::GREATER || obtained == COMPARISON::EQUAL){
+            return true;
+        }
+        return false;
+    }
+    if(expected == COMPARISON::L_EQUAL){
+        if(obtained == COMPARISON::LESS || obtained == COMPARISON::EQUAL){
+            return true;
+        }
+        return false;
+    }
+    return (expected == obtained);
+}
+
+uint64_t timeSinceEpochMillisec() {
+  using namespace std::chrono;
+  return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
+}
 
 void Table::createTable(const std::vector<std::string>& tokens){
     std::string tableName = tokens[2];
@@ -129,8 +172,6 @@ void Table::insertIntoTable(const std::vector<std::string>& tokens){
         return;
     }
 
-    std::string dbName = Database::getCurrentDatabase();
-
     const std::vector< std::vector< std::string > >& columns = Database::getColumnsOfTable(tableName);
     std::vector< std::string > columnValues = getColumnValues(tokens, 4, tokens.size()-1);
 
@@ -144,11 +185,288 @@ void Table::insertIntoTable(const std::vector<std::string>& tokens){
         return;
     }
 
-    int fd = open((DATABASE_DIRECTORY + dbName + "/data/table__" + tableName).c_str(), O_RDWR);
+    std::pair< bool, std::string > saveInfo = saveRow(tableName, columns, columnValues);
+
+    if(!saveInfo.first){
+        Logger::logError(saveInfo.second);
+        return;
+    }
+
+    Logger::logSuccess(saveInfo.second);
+
+}
+
+void Table::handleSelect(const std::vector<std::string>& tokens){
+    /**
+     * @todo Add support for join etc.
+     */
+    std::string tableName = tokens[3];
+
+    if(!Database::isDatabaseChosen()){
+        Logger::logError("Databse not selected");
+        return;
+    }
+
+    if(!Database::checkIfTableExists(tableName)){
+        Logger::logError("Table does not exist");
+        return;
+    }
+
+    std::vector< std::vector< std::string > > columns = Database::getColumnsOfTable(tableName);
+    uint32_t rowSize = getRowSize(columns);
+    // Change when handling select
+    uint32_t queryRowSize = rowSize;
+
+    std::string dbName = Database::getCurrentDatabase();
+
+    std::vector<condition> conditions;
+
+    if(tokens.size()>4){
+        if(tokens[4] == "where"){
+            std::vector< std::string > currentCondition;
+            for(int i=5; i<tokens.size(); i++){
+                if(tokens[i] == "and" || tokens[i] == "&&"){
+                    if(currentCondition.size() == 0){
+                        Logger::logError("empty condition found");
+                        return;
+                    }
+                    condition cd = getCondition(currentCondition);
+                    currentCondition.clear();
+                    if(cd.operation == COMPARISON::INVALID){
+                        Logger::logError("Invalid condition provided");
+                        return;
+                    }
+                    conditions.push_back(cd);
+                } else {
+                    currentCondition.push_back(tokens[i]);
+                }
+            }
+            if(currentCondition.size()){
+                condition cd = getCondition(currentCondition);
+                if(cd.operation == COMPARISON::INVALID){
+                    Logger::logError("Invalid condition provided");
+                    return;
+                }
+                conditions.push_back(cd);
+            }
+        } else {
+            Logger::logError("Only where clause supported now");
+            return;
+        }
+    }
+
+    uint64_t timestamp = timeSinceEpochMillisec(); // Query timestamp
+    std::string queryFileName = "select__"+std::to_string(timestamp);
+
+    memset(WORKBUFFER_B, 0, PAGE_SIZE);
+    uint32_t ptr = 0;
+
+    int fd = open((DATABASE_DIRECTORY+dbName+"/data/table__"+tableName).c_str(), O_RDONLY);
+    int fd2 = open((QUERY_DIRECTORY+dbName+queryFileName).c_str(), O_CREAT | O_RDWR | O_APPEND, S_IRUSR|S_IWUSR);
+
     if(fd < 0){
-        Logger::logError("Can't open table data file");
+        Logger::logError("Table file now found");
         close(fd);
         return;
+    }
+    readFromFile(fd, TABLE_METADATA_PAGE_BUFFER_A);
+    uint64_t totPages;
+    memcpy(&totPages, TABLE_METADATA_PAGE_BUFFER_A + 8, sizeof(totPages));
+
+    for(uint64_t i=1; i<=totPages; i++){
+        lseek(fd, i*PAGE_SIZE,SEEK_SET);
+        readFromFile(fd, CURRENT_TABLE_PAGE_BUFFER_A);
+
+        for(uint32_t j=4; j+rowSize-1<PAGE_SIZE; j+=rowSize){
+            uint64_t currentId;
+            memcpy(&currentId, CURRENT_TABLE_PAGE_BUFFER_A+j, sizeof(currentId));
+            if(currentId != 0){
+                // Non empty row
+                memcpy(WORKBUFFER_A, CURRENT_TABLE_PAGE_BUFFER_A+j, rowSize);
+                int check = verifyConditions(WORKBUFFER_A, columns, conditions, rowSize);
+                if(DEBUG == true){
+                    std::cout << "Check value observed: " << std::endl;
+                }
+
+                if(check == 1){
+                    /**
+                     * @todo select filtering
+                     */
+
+                    if(ptr + queryRowSize - 1 >= PAGE_SIZE){
+                        writeToFile(fd2, WORKBUFFER_B, PAGE_SIZE);
+                        ptr=0;
+                        memset(WORKBUFFER_B, 0, PAGE_SIZE);
+                    }
+                    memcpy(WORKBUFFER_B + ptr, WORKBUFFER_A, queryRowSize);
+                    ptr += queryRowSize;
+                } else if(check == -1){
+                    Logger::logError("Comparisons not in correct format");
+                    return;
+                }
+            }
+        }
+    }
+
+    if(ptr){
+        writeToFile(fd2, WORKBUFFER_B, PAGE_SIZE);
+    }
+
+    printQuery(fd2, queryRowSize, columns);
+
+    close(fd2);
+    close(fd);
+
+}
+
+condition getCondition(const std::vector< std::string >& currentComparison){
+    if(currentComparison.size()==3 && currentComparison[1] == ">"){
+        return condition(currentComparison[0], COMPARISON::GREATER, currentComparison[2]);
+    } else if(currentComparison.size()==3 && currentComparison[1] == "<"){
+        return condition(currentComparison[0], COMPARISON::LESS, currentComparison[2]);
+    } else if(currentComparison.size()==4 && currentComparison[1] == "=" && currentComparison[2] == "="){
+        return condition(currentComparison[0], COMPARISON::EQUAL, currentComparison[3]);
+    } else if(currentComparison.size()==4 && currentComparison[1] == ">" && currentComparison[2] == "="){
+        return condition(currentComparison[0], COMPARISON::G_EQUAL, currentComparison[3]);
+    } else if(currentComparison.size()==4 && currentComparison[1] == "<" && currentComparison[2] == "="){
+        return condition(currentComparison[0], COMPARISON::L_EQUAL, currentComparison[3]);
+    } else {
+        return condition("",COMPARISON::INVALID,"");
+    }
+}
+
+int verifyConditions(char rowBuffer[], const std::vector< std::vector< std::string > >& columns,const std::vector<condition>& conditions, uint32_t rowSize){
+    std::map<std::string, uint32_t> offsets;
+    std::map<std::string, std::string> types;
+    std::map<std::string, uint32_t> sizes;
+
+    uint32_t offset = 8;
+    for(int i=0; i<columns.size(); i++){
+        types[columns[i][0]] = columns[i][1];
+        offsets[columns[i][0]] = offset;
+        uint32_t sz = getTypeSize(columns[i][1]);
+        sizes[columns[i][0]] = sz;
+
+        offset += sz;
+    }
+
+    for(int i=0; i<conditions.size(); i++){
+        if(offsets.find(conditions[i].columnName) == offsets.end()){
+            return -1;
+        }
+        std::string lVal;
+        uint32_t offset = offsets[conditions[i].columnName];
+        std::string type = types[conditions[i].columnName];
+        uint32_t sz = sizes[conditions[i].columnName];
+
+        lVal = getValueFromBytes(rowBuffer, type, offset, offset + sz);
+
+        COMPARISON compResult = getCompResult(lVal ,conditions[i].value, type);
+        if(compResult == COMPARISON::INVALID){
+            return -1;
+        }
+
+        if(!isComparisonValid(conditions[i].operation, compResult)){
+            return 0;
+        }
+    }
+    return 1;
+}
+
+
+COMPARISON getCompResult(std::string lVal, std::string rVal, std::string type){
+    if(!matchType(lVal, type) || !matchType(rVal, type)){
+        return COMPARISON::INVALID;
+    }
+    TYPE _type = getTypeFromString(type);
+
+    switch(_type){
+        case TYPE::INT:
+            if(stoll(lVal) > stoll(rVal)){
+                return COMPARISON::GREATER;
+            } else if(stoll(lVal) < stoll(rVal)){
+                return COMPARISON::LESS;
+            } else if(stoll(lVal) == stoll(rVal)){
+                return COMPARISON::EQUAL;
+            }
+        case TYPE::FLOAT:
+            if(stod(lVal) > stod(rVal)){
+                return COMPARISON::GREATER;
+            } else if(stod(lVal) < stod(rVal)){
+                return COMPARISON::LESS;
+            } else if(stod(lVal) == stod(rVal)){
+                return COMPARISON::EQUAL;
+            }
+        case TYPE::CHAR:
+            if(lVal[1] > rVal[1]){
+                return COMPARISON::GREATER;
+            } else if(lVal[1] < rVal[0]){
+                return COMPARISON::LESS;
+            } else if(lVal[1] == rVal[0]){
+                return COMPARISON::EQUAL;
+            }
+        case TYPE::STRING:
+            for(int i=0;i<std::min(lVal.size(), rVal.size()); i++){
+                if(lVal[i] > rVal[i]){
+                    return COMPARISON::GREATER;
+                } else if(lVal[i] < rVal[i]){
+                    return COMPARISON::LESS;
+                }
+            }
+            return COMPARISON::EQUAL;
+        default:
+            return COMPARISON::INVALID;
+    }
+
+}
+
+void printQuery(int fd, uint32_t rowSize, const std::vector< std::vector< std::string > >& columns){
+    lseek(fd,0,SEEK_SET);
+    int bytesRead;
+    
+    std::cout << Formatter::bold_on;
+    for(int i=0; i < columns.size(); i++){
+        std::cout << std::setw(20) << columns[i][0];
+    }
+    std::cout << Formatter::off << '\n';
+
+    memset(WORKBUFFER_C, 0, PAGE_SIZE);
+
+    while((bytesRead = readFromFile(fd,WORKBUFFER_C))){
+
+        for(int i=0; i<bytesRead; i+=rowSize){
+            uint64_t currentId;
+            memcpy(&currentId, WORKBUFFER_C+i, 8);
+            if(currentId){
+                // Row not empty. Process row
+                uint32_t offset = 8;
+                for(int j=0; j<columns.size();j++){
+                    uint32_t sz = getTypeSize(columns[j][1]);
+                    std::string printVal = getValueFromBytes(WORKBUFFER_C, columns[j][1], i + offset, i + offset + sz);
+                    offset += sz;
+                    std::cout << std::setw(20) << printVal ;
+                }
+                std::cout << '\n';
+            }
+        }
+    }
+}
+
+/**
+ * @brief Save row to the database
+ * 
+ * @param tableName Name of the table into which the row is inserted
+ * @param columns column metadata of the table
+ * @param columnValues values of the row
+ * @return std::pair< bool, std::string > bool for whether it worked or not. string stores the message
+ */
+std::pair< bool, std::string > saveRow(const std::string& tableName, const std::vector< std::vector< std::string > >& columns, const std::vector< std::string >& columnValues){
+    std::string dbName = Database::getCurrentDatabase();
+
+    int fd = open((DATABASE_DIRECTORY + dbName + "/data/table__" + tableName).c_str(), O_RDWR);
+    if(fd < 0){
+        close(fd);
+        return std::make_pair(false, "Can't open table data file");
     }
     
     readFromFile(fd,TABLE_METADATA_PAGE_BUFFER_A);
@@ -179,8 +497,7 @@ void Table::insertIntoTable(const std::vector<std::string>& tokens){
         if(DEBUG == true){
             std::cout << ptr << " " << rowSize << std::endl;
         }
-        Logger::logError("Row size doesn't match");
-        return;
+        return std::make_pair(false, "Row size doesn't match");
     }
 
     // Read last page
@@ -229,14 +546,13 @@ void Table::insertIntoTable(const std::vector<std::string>& tokens){
     lseek(fd, 0, SEEK_SET);
     writeToFile(fd, TABLE_METADATA_PAGE_BUFFER_A);
 
-    Logger::logSuccess("Successfully inserted row");
-
     std::cout << "Tot Bytes in table: " << totBytes << std::endl;
     std::cout << "Tot Pages in Table: " << totPages << std::endl;
     std::cout << "Next ID: " << nextId << std::endl;
 
     close(fd);
 
+    return std::make_pair(true, "Successfully inserted row");
 }
 
 /**

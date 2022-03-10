@@ -2,3 +2,5 @@ databases
 obj
 penguin
 .vscode
+queries
+.DS_Store

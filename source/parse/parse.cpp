@@ -39,6 +39,14 @@ void processCommand(const std::string& command){
 			std::cout << "insert into instruction observed" << std::endl;
 		}
 		Table::insertIntoTable(tokens);
+	} else if(tokens.size() > 3 && tokens[0] == "select" && tokens[1] == "*" && tokens[2] == "from"){
+		if(DEBUG == true){
+			std::cout << "select from instruction observed" << std::endl;
+		}
+		Table::handleSelect(tokens);
+	} else if(tokens.size() == 1 && tokens[0] == "exit"){
+		std::cout << "Bye!" << std::endl;
+		PROG_RUNNING = false;
 	}
 
 }
@@ -99,6 +107,26 @@ std::vector<std::string> generateTokens(const std::string& command){
 					tokens.push_back(word);
 				}
 				tokens.push_back("=");
+				word="";
+			}
+		} else if(command[i] =='>'){
+			if(inChar){
+				word+='>';
+			} else {
+				if(word.length()){
+					tokens.push_back(word);
+				}
+				tokens.push_back(">");
+				word="";
+			}
+		} else if(command[i] =='<'){
+			if(inChar){
+				word+='<';
+			} else {
+				if(word.length()){
+					tokens.push_back(word);
+				}
+				tokens.push_back("<");
 				word="";
 			}
 		} else if(command[i]=='('){

@@ -20,12 +20,13 @@ char WORKBUFFER_B[PAGE_SIZE+1];
 char WORKBUFFER_C[PAGE_SIZE+1];
 char WORKBUFFER_D[PAGE_SIZE+1];
 
-void writeToFile(int fd, char BUFFER[], int totWrite){
+int32_t writeToFile(int fd, char BUFFER[], int totWrite){
     memcpy(WRITE_BUFFER, BUFFER, totWrite);
-    write(fd, WRITE_BUFFER, totWrite);
+    return write(fd, WRITE_BUFFER, totWrite);
 }
 
-void readFromFile(int fd, char BUFFER[], int totRead){
-    read(fd, READ_BUFFER, totRead);
+int32_t readFromFile(int fd, char BUFFER[], int totRead){
+    int32_t bytesRead = read(fd, READ_BUFFER, totRead);
     memcpy(BUFFER, READ_BUFFER, totRead);
+    return bytesRead;
 }
