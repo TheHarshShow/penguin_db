@@ -16,7 +16,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-bool validateTableName(const std::string& name);
+inline bool validateTableName(const std::string& name);
 std::pair<bool, std::string> validateAndProcessColumns(std::vector< std::vector< std::string > >& columns);
 bool validateColumnName(const std::string& name);
 bool saveTable(const std::string &tableString, const std::string& tableName, const std::vector< std::vector< std::string > >& columns);
@@ -112,6 +112,7 @@ void Table::createTable(const std::vector<std::string>& tokens){
     
     if(currentColumn.size()){
         columns.push_back(currentColumn);
+        currentColumn.clear();
     } else {
         Logger::logError("Empty columns are not allowed");
         return;
@@ -284,9 +285,6 @@ void Table::handleSelect(const std::vector<std::string>& tokens){
                 // Non empty row
                 memcpy(WORKBUFFER_A, CURRENT_TABLE_PAGE_BUFFER_A+j, rowSize);
                 int check = verifyConditions(WORKBUFFER_A, columns, conditions, rowSize);
-                if(DEBUG == true){
-                    std::cout << "Check value observed: " << std::endl;
-                }
 
                 if(check == 1){
                     /**
@@ -593,7 +591,7 @@ bool verifyInsertedColumns(const std::vector< std::string >& values, const std::
     return true;
 }
 
-bool validateTableName(const std::string& name){
+inline bool validateTableName(const std::string& name){
     if(name.length()<4 || name.length()>16)
         return false;
     
@@ -630,6 +628,7 @@ between 2 and 16 characters (inclusive). Also, the first character cannot be a n
             return std::make_pair(false, "Column type not supported.");
         }
     }
+    
     std::string tableString;
     for(int i=0;i<columns.size();i++){
         for(int j=0;j<columns[i].size();j++){
@@ -703,7 +702,7 @@ bool saveTable(const std::string &tableString, const std::string& tableName, con
         return false;
     }
 
-    Database::cacheTableInfo(tableName, columns, std::to_string(nextTableId));
+    // Database::cacheTableInfo(tableName, columns, std::to_string(nextTableId));
 
     lseek(fd,0,SEEK_END);
     strcpy(WRITE_BUFFER, _tableString.c_str());

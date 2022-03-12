@@ -1,5 +1,6 @@
 #include <string.h>
 #include <iostream>
+#include <algorithm>
 #include "type.h"
 
 bool verifyStringType(const std::string& type);
@@ -25,7 +26,7 @@ uint32_t getStringLength(const std::string& type){
     
     std::string lengthString = "";
 
-    for(int i=7;i<type.size()-1;i++){
+    for(int i=7;i < std::min((int)type.size()-1, 20); i++){
         if(type[i]<'0' || type[i]>'9'){
             return 0;
         }

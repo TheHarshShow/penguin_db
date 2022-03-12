@@ -1,5 +1,6 @@
 #include <vector>
 #include "parse.h"
+#include "../logger/logger.h"
 #include "../database/database.h"
 #include "../table/table.h"
 
@@ -7,6 +8,12 @@ void stripString(std::string &s);
 std::vector<std::string> generateTokens(const std::string& command);
 
 void processCommand(const std::string& command){
+
+	if(command.size() > 2*PAGE_SIZE){
+		Logger::logError("Query must fit into two pages.");
+		return;
+	}
+
     std::string _command = command;
     stripString(_command);
     std::vector<std::string> tokens = generateTokens(_command);

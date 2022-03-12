@@ -14,11 +14,11 @@
 
 bool validateDatabaseName(const std::string& name);
 void saveDatabase(const std::string &dbName);
-bool loadTables(const std::string& dbName);
+// bool loadTables(const std::string& dbName);
 
 static std::string CURRENT_DATABASE = "NUL";
-static std::map< std::string, std::vector< std::vector < std::string > > > currentTables;
-static std::map< std::string, std::string > tableIds;
+// static std::map< std::string, std::vector< std::vector < std::string > > > currentTables;
+// static std::map< std::string, std::string > tableIds;
 
 void Database::createDatabase(const std::vector<std::string>& tokens){
     if(tokens.size()!=3){
@@ -56,31 +56,8 @@ void Database::useDatabase(const std::vector<std::string>& tokens){
     }
 
     CURRENT_DATABASE = dbName;
-    currentTables.clear();
-    tableIds.clear();
-
-    /**
-     * @todo LOAD TABLES
-     * 
-     */
-    if(!loadTables(dbName)){
-        Logger::logError("Unable to load table metadata");
-        return;
-    }
-
-    if(DEBUG == true){
-        for(auto u:currentTables){
-            std::cout << tableIds[u.first] << " ";
-            std::cout << u.first << ": ";
-            for(int i=0;i<u.second.size();i++){
-                for(int j=0;j<u.second[i].size();j++){
-                    std::cout << u.second[i][j] << " ";
-                }
-                std::cout << "| ";
-            }
-            std::cout << std::endl;
-        }
-    }
+    // currentTables.clear();
+    // tableIds.clear();
 
     Logger::logSuccess("current database: "+dbName);
 
@@ -90,21 +67,144 @@ std::string Database::getCurrentDatabase(){
     return CURRENT_DATABASE;
 }
 
-void Database::cacheTableInfo(const std::string& tableName, const std::vector< std::vector< std::string >>& columns, const std::string& id){
-    currentTables[tableName] = columns;
-    tableIds[tableName] = id;
-}
-
 bool Database::isDatabaseChosen(){
     return (CURRENT_DATABASE!="NUL");
 }
 
 bool Database::checkIfTableExists(const std::string& tableName){
-    return (currentTables.find(tableName) != currentTables.end());
+    if(!Database::isDatabaseChosen()){
+        return false;
+    }
+    int fd = open((DATABASE_DIRECTORY+CURRENT_DATABASE+"/tables").c_str(), O_RDONLY);
+    if(fd < 0){
+        Logger::logError("Unable to load table info");
+        return false;
+    }
+    uint64_t prevSeek = 8; // nextId takes 8 bytes.
+    uint64_t totRead = 1; // Arbitrary definition
+
+    while(totRead){
+        uint32_t latestLineStart = 0;
+        lseek(fd, prevSeek, SEEK_SET);
+        totRead = readFromFile(fd, WORKBUFFER_A);
+
+        for(int i=0;i<totRead;i++){
+            if(WORKBUFFER_A[i] == '\n') {
+
+                int32_t lastSpace = latestLineStart;
+                bool matched = true;
+                for(int j=latestLineStart; j<i; j++){
+                    //Firse space represents end of id
+                    if(WORKBUFFER_A[j]==' '){
+                        if(lastSpace - latestLineStart){
+                            if(j - lastSpace != tableName.length()){
+                                matched = false;
+                            }
+                            break;
+                        }
+                        lastSpace = j + 1;
+                    } else if(lastSpace - latestLineStart){
+                        if(tableName.length() <= j-lastSpace || tableName[j - lastSpace] != WORKBUFFER_A[j]){
+                            matched = false;
+                            break;
+                        }
+                    }
+                }
+                if(matched){
+                    return true;
+                }
+
+                latestLineStart = i+1;
+            }
+        }
+        prevSeek += latestLineStart;
+    }
+
+    close(fd);
+
+    return false;
 }
 
-const std::vector< std::vector< std::string > >& Database::getColumnsOfTable(const std::string& tableName){
-    return currentTables[tableName];
+const std::vector< std::vector< std::string > > Database::getColumnsOfTable(const std::string& tableName){
+
+    std::vector< std::vector <std::string > > columns;
+
+    if(!Database::isDatabaseChosen()){
+        return columns;
+    }
+
+    int fd = open((DATABASE_DIRECTORY + CURRENT_DATABASE + "/tables").c_str(), O_RDONLY);
+    if(fd < 0){
+        Logger::logError("Unable to load table info");
+        return columns;
+    }
+
+    uint64_t prevSeek = 8; // nextId takes 8 bytes.
+    uint64_t totRead = 1; // Arbitrary definition
+
+    while(totRead){
+        uint32_t latestLineStart = 0;
+        lseek(fd, prevSeek, SEEK_SET);
+        totRead = readFromFile(fd, WORKBUFFER_A);
+
+        for(int i=0;i<totRead;i++){
+            if(WORKBUFFER_A[i] == '\n') {
+
+                //match name first
+                int32_t lastSpace = latestLineStart;
+                bool matched = true;
+                for(int j=latestLineStart; j<i; j++){
+                    //Firse space represents end of id
+                    if(WORKBUFFER_A[j]==' '){
+                        if(lastSpace - latestLineStart){
+                            if(j - lastSpace != tableName.length()){
+                                matched = false;
+                            }
+                            lastSpace = j + 1;
+                            break;
+                        }
+                        lastSpace = j + 1;
+                    } else if(lastSpace - latestLineStart){
+
+                        if(tableName.length() <= j-lastSpace || tableName[j - lastSpace] != WORKBUFFER_A[j]){
+                            matched = false;
+                            break;
+                        }
+                    }
+                }
+                if(matched){
+
+                    // process columns
+                    std::vector< std::string > currentColumn;
+                    std::string word;
+                    for(int j=lastSpace; j<i; j++){
+                        if(WORKBUFFER_A[j] == '$'){
+                            //Column end
+                            currentColumn.push_back(word);
+                            columns.push_back(currentColumn);
+                            currentColumn.clear();
+                            word = "";
+                        } else if(WORKBUFFER_A[j] == ' '){
+                            if(word.size()){
+                                currentColumn.push_back(word);
+                                word = "";
+                            }
+                        } else {
+                            word+=WORKBUFFER_A[j];
+                        }
+                    }
+                    return columns;
+                }
+
+                latestLineStart = i+1;
+            }
+        }
+        prevSeek += latestLineStart;
+    }
+
+    close(fd);
+
+    return columns;
 }
 
 bool validateDatabaseName(const std::string& name){
@@ -161,97 +261,102 @@ void saveDatabase(const std::string &dbName){
 	}
 }
 
-/**
- * @brief Caches a single table line read from the tables file
- * 
- * @param currentLine Line giving table description read from the tables file
- */
-void processTableLine(const std::string& currentLine){
-    std::string id;
-    std::string tableName;
+// /**
+//  * @brief Caches a single table line read from the tables file
+//  * 
+//  * @param currentLine Line giving table description read from the tables file
+//  */
+// void processTableLine(const std::string& currentLine){
+//     std::string id;
+//     std::string tableName;
 
-    int i;
-    for(i=0; i<currentLine.size(); i++){
-        if(currentLine[i]==' '){
-            i++;
-            break;
-        }
-        id+=currentLine[i];
-    }
-    for(; i<currentLine.size(); i++){
-        if(currentLine[i]==' '){
-            break;
-        }
-        tableName+=currentLine[i];
-    }
+//     int i;
+//     for(i=0; i<currentLine.size(); i++){
+//         if(currentLine[i]==' '){
+//             i++;
+//             break;
+//         }
+//         id+=currentLine[i];
+//     }
+//     for(; i<currentLine.size(); i++){
+//         if(currentLine[i]==' '){
+//             break;
+//         }
+//         tableName+=currentLine[i];
+//     }
 
-    std::vector< std::string > currentColumn;
-    std::vector< std::vector< std::string > > columns;
-    std::string word;
+//     std::vector< std::string > currentColumn;
+//     std::vector< std::vector< std::string > > columns;
+//     std::string word;
 
-    for(;i<currentLine.size();i++){
-        if(currentLine[i] == '$'){
-            // Column end
-            currentColumn.push_back(word);
-            columns.push_back(currentColumn);
-            currentColumn.clear();
-            word = "";
-        } else if(currentLine[i] == ' '){
-            if(word.size()){ 
-                currentColumn.push_back(word);
-                word = "";
-            }
-        } else {
-            word+=currentLine[i];
-        }
-    }
+//     for(;i<currentLine.size();i++){
+//         if(currentLine[i] == '$'){
+//             // Column end
+//             currentColumn.push_back(word);
+//             columns.push_back(currentColumn);
+//             currentColumn.clear();
+//             word = "";
+//         } else if(currentLine[i] == ' '){
+//             if(word.size()){ 
+//                 currentColumn.push_back(word);
+//                 word = "";
+//             }
+//         } else {
+//             word+=currentLine[i];
+//         }
+//     }
 
-    Database::cacheTableInfo(tableName,columns,id);
+//     Database::cacheTableInfo(tableName,columns,id);
 
-}
+// }
 
-/**
- * @brief Load table metadata of a database into the in memory cache
- * 
- * @param dbName name of a database
- * @return true if it worked
- * @return false if it didn't work
- */
-bool loadTables(const std::string& dbName){
-    int fd = open((DATABASE_DIRECTORY + dbName + "/tables").c_str(), O_RDONLY);
-    if(fd<0){
-        close(fd);
-        Logger::logError("Unable to load table info");
-        return false;
-    }
+// void Database::cacheTableInfo(const std::string& tableName, const std::vector< std::vector< std::string >>& columns, const std::string& id){
+//     currentTables[tableName] = columns;
+//     tableIds[tableName] = id;
+// }
+
+// /**
+//  * @brief Load table metadata of a database into the in memory cache
+//  * 
+//  * @param dbName name of a database
+//  * @return true if it worked
+//  * @return false if it didn't work
+//  */
+// bool loadTables(const std::string& dbName){
+//     int fd = open((DATABASE_DIRECTORY + dbName + "/tables").c_str(), O_RDONLY);
+//     if(fd<0){
+//         close(fd);
+//         Logger::logError("Unable to load table info");
+//         return false;
+//     }
     
-    uint32_t prevSeek = 8; // nextId takes 8 bytes.
-    uint32_t totRead = 1; // Arbitrary definition
+//     uint32_t prevSeek = 8; // nextId takes 8 bytes.
+//     uint32_t totRead = 1; // Arbitrary definition
 
-    while(totRead){
+//     while(totRead){
 
-        uint32_t additionalSeek = 0;
+//         uint32_t latestLineStart = 0;
 
-        lseek(fd, prevSeek, SEEK_SET);
-        totRead = read(fd,READ_BUFFER,PAGE_SIZE);
+//         lseek(fd, prevSeek, SEEK_SET);
+//         totRead = read(fd,READ_BUFFER,PAGE_SIZE);
 
-        std::string currentLine;
-        for(int i=0; i < std::min(totRead,PAGE_SIZE); i++){
-            if(READ_BUFFER[i] != '\n'){
-                currentLine+=READ_BUFFER[i];
-            } else {
+//         std::string currentLine;
+//         for(int i=0; i < std::min(totRead,PAGE_SIZE); i++){
+//             if(READ_BUFFER[i] != '\n'){
+//                 currentLine+=READ_BUFFER[i];
+//             } else {
 
-                processTableLine(currentLine);
+//                 processTableLine(currentLine);
 
-                additionalSeek = i+1;
-                currentLine = "";
-            }
-        }
+//                 latestLineStart = i+1;
+//                 currentLine = "";
+//             }
+//         }
 
-        prevSeek += additionalSeek;
+//         prevSeek += latestLineStart;
 
-    }
+//     }
 
-    close(fd);
-    return true;
-}
+//     close(fd);
+//     return true;
+// }
