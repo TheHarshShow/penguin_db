@@ -62,6 +62,10 @@ uint32_t readPage(char BUFFER[], uint64_t fileId, uint64_t pageNumber){
     uint32_t totRead = readFromFile(fd,BUFFER);
     close(fd);
 
+    if(totRead == -1){
+        totRead = 0;
+    }
+
     return totRead;
 }
 
@@ -76,8 +80,12 @@ bool writeToPage(char BUFFER[], uint64_t fileId, uint64_t pageNumber, int additi
     }
 
     lseek(fd, pageNumber*PAGE_SIZE, SEEK_SET);
-    writeToFile(fd,BUFFER);
+    uint32_t totRead = writeToFile(fd,BUFFER);
     close(fd);
+
+    if(totRead == -1){
+        return false;
+    }
 
     return true;
 }

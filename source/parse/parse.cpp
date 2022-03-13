@@ -31,7 +31,7 @@ void processCommand(const std::string& command){
             std::cout << "create database query observed" << std::endl;
         }
         Database::createDatabase(tokens);
-    } else if(tokens.size()>2 && tokens[0] == "use" && tokens[1] == "database"){
+    } else if(tokens.size()>1 && tokens[0] == "use"){
 		if(DEBUG == true){
 			std::cout << "use database query observed" << std::endl;
 		}

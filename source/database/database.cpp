@@ -43,12 +43,12 @@ void Database::createDatabase(const std::vector<std::string>& tokens){
 }
 
 void Database::useDatabase(const std::vector<std::string>& tokens){
-    if(tokens.size()!=3){
+    if(tokens.size()!=2){
         Logger::logError("Instruction has incorrect number of arguments");
         return;
     }
 
-    std::string dbName = tokens[2];
+    std::string dbName = tokens[1];
 
     if(!(std::filesystem::exists(DATABASE_DIRECTORY+dbName))){
         Logger::logError("Database with provided name does not exist");
