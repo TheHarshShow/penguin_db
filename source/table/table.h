@@ -10,6 +10,7 @@ enum class COMPARISON {
     LESS,
     G_EQUAL,
     L_EQUAL,
+    ASSIGNMENT,
     INVALID
 };
 
@@ -29,6 +30,7 @@ public:
     static void createTable(const std::vector<std::string>& tokens);
     static void insertIntoTable(const std::vector<std::string>& tokens);
     static void handleSelect(const std::vector<std::string>& tokens);
+    static void handleUpdateTable(const std::vector<std::string>& tokens);
 };
 
 #endif // TABLE_H

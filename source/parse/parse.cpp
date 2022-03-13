@@ -28,33 +28,40 @@ void processCommand(const std::string& command){
 
     if(tokens.size()>2 && tokens[0] == "create" && tokens[1] == "database"){
         if(DEBUG == true){
-            std::cout << "\ncreate database instruction observed" << std::endl;
+            std::cout << "create database query observed" << std::endl;
         }
         Database::createDatabase(tokens);
     } else if(tokens.size()>2 && tokens[0] == "use" && tokens[1] == "database"){
 		if(DEBUG == true){
-			std::cout << "\nuse database instruction observed" << std::endl;
+			std::cout << "use database query observed" << std::endl;
 		}
 		Database::useDatabase(tokens);
 	} else if(tokens.size()>2 && tokens[0] == "create" && tokens[1] == "table"){
 		if(DEBUG == true){
-			std::cout << "create table instruction observed" << std::endl;
+			std::cout << "create table query observed" << std::endl;
 		}
 		Table::createTable(tokens);
 	} else if(tokens.size()>2 && tokens[0] == "insert" && tokens[1] == "into"){
 		if(DEBUG == true){
-			std::cout << "insert into instruction observed" << std::endl;
+			std::cout << "insert into query observed" << std::endl;
 		}
 		Table::insertIntoTable(tokens);
 	} else if(tokens.size() > 3 && tokens[0] == "select" && tokens[1] == "*" && tokens[2] == "from"){
 		if(DEBUG == true){
-			std::cout << "select from instruction observed" << std::endl;
+			std::cout << "select from query observed" << std::endl;
 		}
 		Table::handleSelect(tokens);
+	} else if(tokens.size()>3 && tokens[0] == "update"){
+		if(DEBUG == true){
+			std::cout << "update query provided" << std::endl;
+		}
+		Table::handleUpdateTable(tokens);
 	} else if(tokens.size() == 1 && tokens[0] == "exit"){
 		std::cout << "Bye!" << std::endl;
 		PROG_RUNNING = false;
 	}
+	
+	std::cout << std::endl;
 
 }
 

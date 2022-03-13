@@ -25,8 +25,9 @@ std::vector< std::string > getColumnValues(const std::vector<std::string>& token
 bool verifyInsertedColumns(const std::vector< std::string >& values, const std::vector< std::vector< std::string > >& columns);
 std::pair< bool, std::string > saveRow(const std::string& tableName, const std::vector< std::vector< std::string > >& columns, const std::vector< std::string >& columnValues);
 int verifyConditions(char rowBuffer[], const std::vector< std::vector< std::string > >& columns,const std::vector<condition>& conditions, uint32_t rowSize);
-void printQuery(int fd, uint32_t rowSize, const std::vector< std::vector< std::string > >& columns);
+void printQuery(uint64_t fileId, uint32_t rowSize, const std::vector< std::vector< std::string > >& columns);
 condition getCondition(const std::vector< std::string >& currentComparison);
+bool updateRow(char BUFFER[], const std::vector< condition >& assignments, const std::vector< std::vector< std::string > >& columns);
 
 COMPARISON stringToComparison(const std::string& comp){
     if(comp == "=="){
@@ -257,6 +258,8 @@ void Table::handleSelect(const std::vector<std::string>& tokens){
     }
 
     uint64_t timestamp = timeSinceEpochMillisec(); // Query timestamp
+    uint64_t queryFileId = ( ( timestamp % ((uint64_t)1 << LOG_MAX_TABLES) ) + ( (uint64_t)1 << LOG_MAX_TABLES) );
+
     std::string queryFileName = "select__"+std::to_string(timestamp);
 
     memset(WORKBUFFER_B, 0, PAGE_SIZE);
@@ -264,22 +267,16 @@ void Table::handleSelect(const std::vector<std::string>& tokens){
 
     uint64_t tableId = Database::getTableId(tableName);
 
-    int fd = open((DATABASE_DIRECTORY+dbName+"/data/table__"+std::to_string(tableId)).c_str(), O_RDONLY);
-    if(fd < 0){
-        Logger::logError("Error in loading table metadata file");
-        close(fd);
-        return;
-    }
+    // int fd2 = open((QUERY_DIRECTORY+dbName+queryFileName).c_str(), O_CREAT | O_RDWR | O_APPEND, S_IRUSR|S_IWUSR);
 
-    int fd2 = open((QUERY_DIRECTORY+dbName+queryFileName).c_str(), O_CREAT | O_RDWR | O_APPEND, S_IRUSR|S_IWUSR);
-
-    readFromFile(fd, TABLE_METADATA_PAGE_BUFFER_A);
+    readPage(TABLE_METADATA_PAGE_BUFFER_A, tableId, 0);
     uint64_t totPages;
     memcpy(&totPages, TABLE_METADATA_PAGE_BUFFER_A + 8, sizeof(totPages));
 
+    uint64_t queryCurrentPage = 0;
+
     for(uint64_t i=1; i<=totPages; i++){
-        lseek(fd, i*PAGE_SIZE,SEEK_SET);
-        readFromFile(fd, CURRENT_TABLE_PAGE_BUFFER_A);
+        readPage(CURRENT_TABLE_PAGE_BUFFER_A, tableId, i);
 
         for(uint32_t j=4; j+rowSize-1<PAGE_SIZE; j+=rowSize){
             uint64_t currentId;
@@ -295,9 +292,14 @@ void Table::handleSelect(const std::vector<std::string>& tokens){
                      */
 
                     if(ptr + queryRowSize - 1 >= PAGE_SIZE){
-                        writeToFile(fd2, WORKBUFFER_B, PAGE_SIZE);
+                        
+                        if(!writeToPage(WORKBUFFER_B, queryFileId, queryCurrentPage,  O_CREAT, S_IRUSR|S_IWUSR)){
+                            Logger::logError("Error in writing to query file");
+                            return;
+                        }
                         ptr=0;
                         memset(WORKBUFFER_B, 0, PAGE_SIZE);
+                        queryCurrentPage++;
                     }
                     memcpy(WORKBUFFER_B + ptr, WORKBUFFER_A, queryRowSize);
                     ptr += queryRowSize;
@@ -310,14 +312,136 @@ void Table::handleSelect(const std::vector<std::string>& tokens){
     }
 
     if(ptr){
-        writeToFile(fd2, WORKBUFFER_B, PAGE_SIZE);
+
+        writeToPage(WORKBUFFER_B, queryFileId, queryCurrentPage, O_CREAT, S_IRUSR|S_IWUSR);
+        ptr=0;
+        memset(WORKBUFFER_B, 0, PAGE_SIZE);
+        queryCurrentPage++;
     }
 
-    printQuery(fd2, queryRowSize, columns);
+    printQuery(queryFileId, queryRowSize, columns);
 
-    close(fd2);
-    close(fd);
+}
 
+void Table::handleUpdateTable(const std::vector<std::string>& tokens){
+    if(!Database::isDatabaseChosen()){
+        Logger::logError("Database is not selected");
+        return;
+    }
+
+    std::string tableName = tokens[1];
+    uint64_t tableId;
+
+    if(!(tableId = Database::getTableId(tableName))){
+        Logger::logError("Table with given name does not exist");
+        return;
+    }
+
+    if(tokens.size() < 6 || tokens[2] != "set"){
+        Logger::logError("Syntax error in update query");
+        return;
+    }
+
+    std::vector< std::string > currentAssignment;
+    std::vector< condition > assignments;
+    std::vector< condition > conditions;
+    std::string word;
+
+    int i;
+    for(i=3; i<tokens.size(); i++){
+        if(tokens[i] == "where"){
+            break;
+        }
+        if(tokens[i] == "and"  || tokens[i] == "&&"){
+            if(currentAssignment.size() != 3 || currentAssignment[1] != "="){
+                Logger::logError("Error in one of the assignment syntaxes");
+                return;
+            }
+            condition assignment(currentAssignment[0], COMPARISON::ASSIGNMENT, currentAssignment[2]);
+            assignments.push_back(assignment);
+            currentAssignment.clear();
+        } else {
+            currentAssignment.push_back(tokens[i]);
+        }
+    }
+
+    if(currentAssignment.size() == 0){
+        Logger::logError("An assignment is missing");
+        return;
+    }
+
+    if(currentAssignment.size() != 3 || currentAssignment[1] != "="){
+        Logger::logError("Error in one of the assignment syntaxes");
+        return;
+    }
+    condition assignment(currentAssignment[0], COMPARISON::ASSIGNMENT, currentAssignment[2]);
+    assignments.push_back(assignment);
+    currentAssignment.clear();
+
+
+    std::vector< std::string > currentCondition;
+    if(i++ != tokens.size()){
+        //where clause; process conditions;
+        for(;i<tokens.size();i++){
+            if(tokens[i] == "and" || tokens[i] == "&&"){
+                condition cd = getCondition(currentCondition);
+                if(cd.operation == COMPARISON::INVALID){
+                    Logger::logError("Invalid condition");
+                    return;
+                }
+                conditions.push_back(cd);
+                currentCondition.clear();
+            } else {
+                currentCondition.push_back(tokens[i]);
+            }
+        }
+        if(currentCondition.size() == 0){
+            Logger::logError("condition missing");
+            return;
+        }
+        condition cd = getCondition(currentCondition);
+        if(cd.operation == COMPARISON::INVALID){
+            Logger::logError("Invalid condition");
+            return;
+        }
+        conditions.push_back(cd);
+        currentCondition.clear();
+    }
+
+    std::vector< std::vector< std::string > > columns = Database::getColumnsOfTable(tableName);
+    uint32_t rowSize = getRowSize(columns);
+    
+    readPage(TABLE_METADATA_PAGE_BUFFER_A, tableId, 0);
+    uint64_t totalPages;
+    memcpy(&totalPages, TABLE_METADATA_PAGE_BUFFER_A + 8, sizeof(totalPages));
+
+    for(uint64_t i=1; i<=totalPages; i++){
+        readPage(CURRENT_TABLE_PAGE_BUFFER_A, tableId, i);
+
+        for(uint32_t j = 4; j + rowSize - 1 < PAGE_SIZE; j+=rowSize){
+            uint64_t currentId;
+            memcpy(&currentId, CURRENT_TABLE_PAGE_BUFFER_A+j, sizeof(currentId));
+            if(currentId != 0){
+                memset(WORKBUFFER_A, 0 , PAGE_SIZE);
+                memcpy(WORKBUFFER_A, CURRENT_TABLE_PAGE_BUFFER_A + j, rowSize);
+                int check = verifyConditions(WORKBUFFER_A, columns, conditions, rowSize);
+                if(check == 1){
+                    //Update row
+                    if(!updateRow(WORKBUFFER_A, assignments, columns)){
+                        Logger::logError("Column name not found or value type mismatch");
+                        return;
+                    }
+                    memcpy(CURRENT_TABLE_PAGE_BUFFER_A + j, WORKBUFFER_A, rowSize);
+                }
+            }
+        }
+
+        if(writeToPage(CURRENT_TABLE_PAGE_BUFFER_A, tableId, i)){
+            Logger::logSuccess("Successfully updated table");
+        } else {
+            Logger::logError("Error in writing changes to disk");
+        }
+    }
 }
 
 condition getCondition(const std::vector< std::string >& currentComparison){
@@ -334,6 +458,37 @@ condition getCondition(const std::vector< std::string >& currentComparison){
     } else {
         return condition("",COMPARISON::INVALID,"");
     }
+}
+
+bool updateRow(char BUFFER[], const std::vector< condition >& assignments, const std::vector< std::vector< std::string > >& columns){
+    std::map<std::string, uint32_t> offsets;
+    std::map<std::string, uint32_t> sizes;
+    std::map<std::string, std::string> types;
+
+    uint32_t offset = 8;
+    for(int i=0;i<columns.size();i++){
+        types[columns[i][0]] = columns[i][1];
+        offsets[columns[i][0]] = offset;
+        uint32_t sz = getTypeSize(columns[i][1]);
+        sizes[columns[i][0]] = sz;
+
+        offset += sz;
+    }
+
+    for(int i=0;i<assignments.size();i++){
+        if(offsets.find(assignments[i].columnName) == offsets.end()){
+            return false;
+        }
+        std::string type = types[assignments[i].columnName];
+        if(!matchType(assignments[i].value, type)){
+            return false;
+        }
+        uint32_t sz = sizes[assignments[i].columnName];
+        uint32_t offset = offsets[assignments[i].columnName];
+        std::string bytes = getBytesFromValue(assignments[i].value, type);
+        memcpy(BUFFER + offset, bytes.c_str(), sz);
+    }
+    return true;
 }
 
 int verifyConditions(char rowBuffer[], const std::vector< std::vector< std::string > >& columns,const std::vector<condition>& conditions, uint32_t rowSize){
@@ -421,9 +576,7 @@ COMPARISON getCompResult(std::string lVal, std::string rVal, std::string type){
 
 }
 
-void printQuery(int fd, uint32_t rowSize, const std::vector< std::vector< std::string > >& columns){
-    lseek(fd,0,SEEK_SET);
-    int bytesRead;
+void printQuery(uint64_t fileId, uint32_t rowSize, const std::vector< std::vector< std::string > >& columns){
     
     std::cout << Formatter::bold_on;
     for(int i=0; i < columns.size(); i++){
@@ -433,7 +586,10 @@ void printQuery(int fd, uint32_t rowSize, const std::vector< std::vector< std::s
 
     memset(WORKBUFFER_C, 0, PAGE_SIZE);
 
-    while((bytesRead = readFromFile(fd,WORKBUFFER_C))){
+    int bytesRead;
+    uint32_t currentPage = 0;
+
+    while((bytesRead = readPage(WORKBUFFER_C, fileId, currentPage))){
 
         for(int i=0; i<bytesRead; i+=rowSize){
             uint64_t currentId;
@@ -450,6 +606,8 @@ void printQuery(int fd, uint32_t rowSize, const std::vector< std::vector< std::s
                 std::cout << '\n';
             }
         }
+
+        currentPage++;
     }
 }
 
@@ -683,7 +841,7 @@ bool saveTable(const std::string &tableString, const std::string& tableName, con
     // Write to table metadata file
     /**
      * @brief Table metadata file format:
-     * 1) first 8 bytes of first page is the next table id
+     * 1) first 8 bytes of first page is the next table id. Next 8 bytes is total pages
      * 2) subsequent pages store table metadata
      */
 
@@ -706,7 +864,10 @@ bool saveTable(const std::string &tableString, const std::string& tableName, con
     }
 
     memset(WORKBUFFER_B, 0, PAGE_SIZE);
-    readPage(WORKBUFFER_B, 0, totMetadataPages);
+    if(!readPage(WORKBUFFER_B, 0, totMetadataPages)){
+        return false;
+    }
+
     bool written = false;
     while(true){
         for(int i=0; i<PAGE_SIZE - ((int)_tableString.length() - 1); i++){
@@ -730,13 +891,17 @@ bool saveTable(const std::string &tableString, const std::string& tableName, con
         std::cout << "Page being written to " << totMetadataPages << std::endl;
     }
 
-    writeToPage(WORKBUFFER_B, 0, totMetadataPages);
+    if(!writeToPage(WORKBUFFER_B, 0, totMetadataPages)){
+        return false;
+    }
 
     uint64_t nextTableId = currentTableId+1;
     memcpy(WORKBUFFER_A, &nextTableId, sizeof(nextTableId));
     memcpy(WORKBUFFER_A + sizeof(nextTableId), &totMetadataPages, sizeof(totMetadataPages));
 
-    writeToPage(WORKBUFFER_A, 0, 0);
+    if(!writeToPage(WORKBUFFER_A, 0, 0)){
+        return false;
+    }
 
     /**
      * @brief Write initial data to table file
@@ -745,15 +910,8 @@ bool saveTable(const std::string &tableString, const std::string& tableName, con
      * 2) First 8 bytes stores total number of bytes occupied. Second 8 bytes stores total number of pages allocated so far. Third 8 bytes store next unique ID
      * 2) The rest of the pages store data
      */
-    std::string dbName = Database::getCurrentDatabase();
-    int fd = open((DATABASE_DIRECTORY + dbName + "/data/table__"+std::to_string(currentTableId)).c_str(), O_CREAT | O_WRONLY, S_IRUSR|S_IWUSR);
-    if(fd < 0){
-        Logger::logError("Unable to create table properly");
-        close(fd);
-        return false;
-    }
 
-    memset(WRITE_BUFFER,0,PAGE_SIZE+1);
+    memset(WORKBUFFER_A,0,PAGE_SIZE+1);
     uint64_t totBytes = 0;
     uint64_t totPages = 1;
     uint64_t nextId = 1;
@@ -761,13 +919,15 @@ bool saveTable(const std::string &tableString, const std::string& tableName, con
     memcpy(WORKBUFFER_A, &totBytes, sizeof(totBytes));
     memcpy(WORKBUFFER_A + sizeof(totBytes), &totPages, sizeof(totBytes));
     memcpy(WORKBUFFER_A + sizeof(totBytes) + sizeof(totPages), &nextId, sizeof(totBytes));
-    writeToFile(fd,WORKBUFFER_A);
+
+    if(!writeToPage(WORKBUFFER_A, currentTableId, 0, O_CREAT, S_IRUSR|S_IWUSR)){
+        return false;
+    }
 
     memset(WORKBUFFER_A,0,PAGE_SIZE);
-    lseek(fd,PAGE_SIZE,SEEK_SET);
-    writeToFile(fd,WORKBUFFER_A);
-
-    close(fd);
+    if(!writeToPage(WORKBUFFER_A, currentTableId, 1)){
+        return false;
+    }
 
     Logger::logSuccess("Successfully created table with name: "+ tableName);
 
