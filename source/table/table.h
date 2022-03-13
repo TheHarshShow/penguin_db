@@ -31,6 +31,7 @@ public:
     static void insertIntoTable(const std::vector<std::string>& tokens);
     static void handleSelect(const std::vector<std::string>& tokens);
     static void handleUpdateTable(const std::vector<std::string>& tokens);
+    static void handleDeleteRow(const std::vector<std::string>& tokens);
 };
 
 #endif // TABLE_H

@@ -51,11 +51,17 @@ void processCommand(const std::string& command){
 			std::cout << "select from query observed" << std::endl;
 		}
 		Table::handleSelect(tokens);
-	} else if(tokens.size()>3 && tokens[0] == "update"){
+	} else if(tokens.size()>3 && tokens[0] == "update" && tokens[2] == "set"){
 		if(DEBUG == true){
-			std::cout << "update query provided" << std::endl;
+			std::cout << "update query observed" << std::endl;
 		}
 		Table::handleUpdateTable(tokens);
+	} else if(tokens.size()>4 && tokens[0] == "delete" && tokens[1] == "from"){
+		if(DEBUG == true){
+			std::cout << "delete from query observed" << std::endl;
+		}
+		Table::handleDeleteRow(tokens);
+
 	} else if(tokens.size() == 1 && tokens[0] == "exit"){
 		std::cout << "Bye!" << std::endl;
 		PROG_RUNNING = false;

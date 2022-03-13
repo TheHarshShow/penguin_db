@@ -243,14 +243,16 @@ void Table::handleSelect(const std::vector<std::string>& tokens){
                     currentCondition.push_back(tokens[i]);
                 }
             }
-            if(currentCondition.size()){
-                condition cd = getCondition(currentCondition);
-                if(cd.operation == COMPARISON::INVALID){
-                    Logger::logError("Invalid condition provided");
-                    return;
-                }
-                conditions.push_back(cd);
+            if(!currentCondition.size()){
+                Logger::logError("Empty condition provided");
+                return;
             }
+            condition cd = getCondition(currentCondition);
+            if(cd.operation == COMPARISON::INVALID){
+                Logger::logError("Invalid condition provided");
+                return;
+            }
+            conditions.push_back(cd);
         } else {
             Logger::logError("Only where clause supported now");
             return;
@@ -337,11 +339,6 @@ void Table::handleUpdateTable(const std::vector<std::string>& tokens){
         return;
     }
 
-    if(tokens.size() < 6 || tokens[2] != "set"){
-        Logger::logError("Syntax error in update query");
-        return;
-    }
-
     std::vector< std::string > currentAssignment;
     std::vector< condition > assignments;
     std::vector< condition > conditions;
@@ -413,10 +410,11 @@ void Table::handleUpdateTable(const std::vector<std::string>& tokens){
     
     readPage(TABLE_METADATA_PAGE_BUFFER_A, tableId, 0);
     uint64_t totalPages;
-    memcpy(&totalPages, TABLE_METADATA_PAGE_BUFFER_A + 8, sizeof(totalPages));
+    memcpy(&totalPages, TABLE_METADATA_PAGE_BUFFER_A + sizeof(totalPages), sizeof(totalPages));
 
     for(uint64_t i=1; i<=totalPages; i++){
         readPage(CURRENT_TABLE_PAGE_BUFFER_A, tableId, i);
+        bool pageChanged = false;
 
         for(uint32_t j = 4; j + rowSize - 1 < PAGE_SIZE; j+=rowSize){
             uint64_t currentId;
@@ -432,16 +430,108 @@ void Table::handleUpdateTable(const std::vector<std::string>& tokens){
                         return;
                     }
                     memcpy(CURRENT_TABLE_PAGE_BUFFER_A + j, WORKBUFFER_A, rowSize);
+                    pageChanged = true;
+                } else if(check == -1) {
+                    Logger::logError("Comparisons not in correct format");
+                    return;
                 }
             }
         }
 
-        if(writeToPage(CURRENT_TABLE_PAGE_BUFFER_A, tableId, i)){
-            Logger::logSuccess("Successfully updated table");
-        } else {
-            Logger::logError("Error in writing changes to disk");
+        if(pageChanged){
+            if(!writeToPage(CURRENT_TABLE_PAGE_BUFFER_A, tableId, i)){
+                Logger::logError("Error in writing changes to disk");
+                return;
+            }
         }
     }
+    Logger::logSuccess("Successfully updated table");
+}
+
+void Table::handleDeleteRow(const std::vector<std::string>& tokens){
+    if(!Database::isDatabaseChosen()){
+        Logger::logError("No database chosen");
+        return;
+    }
+    std::string tableName = tokens[2];
+    uint64_t tableId;
+    if((tableId = Database::getTableId(tableName)) == 0){
+        Logger::logError("Table with name "+tableName +" does not exist");
+        return;
+    }
+    if(tokens[3] != "where"){
+        Logger::logError("conditions missing");
+        return;
+    }
+
+    std::vector< condition > conditions;
+    std::vector< std::string > currentCondition;
+    for(int i=4; i<tokens.size();i++){
+        if(tokens[i] == "and" || tokens[i] == "&&"){
+            if(currentCondition.size()==0){
+                Logger::logError("empty condition provided");
+                return;
+            }
+            condition cd = getCondition(currentCondition);
+            currentCondition.clear();
+            if(cd.operation == COMPARISON::INVALID){
+                Logger::logDebug("Invalid condition provided");
+                return;
+            }
+            conditions.push_back(cd);
+        } else {
+            currentCondition.push_back(tokens[i]);
+        }
+    }
+    if(!currentCondition.size()){
+        Logger::logError("Empty condition provided");
+        return;
+    }
+    condition cd = getCondition(currentCondition);
+    conditions.push_back(cd);
+    currentCondition.clear();
+
+    std::vector< std::vector< std::string > > columns = Database::getColumnsOfTable(tableName);
+    uint32_t rowSize = getRowSize(columns);
+
+    readPage(TABLE_METADATA_PAGE_BUFFER_A, tableId, 0);
+    uint64_t totBytes, totalPages;
+    memcpy(&totalPages, TABLE_METADATA_PAGE_BUFFER_A, sizeof(totBytes));
+    memcpy(&totalPages, TABLE_METADATA_PAGE_BUFFER_A + sizeof(totBytes), sizeof(totalPages));
+
+    for(uint64_t i=1; i<=totalPages; i++){
+        readPage(CURRENT_TABLE_PAGE_BUFFER_A, tableId, i);
+        bool pageChanged = false;
+
+        for(uint32_t j=4; j+rowSize-1<PAGE_SIZE; j+=rowSize){
+            uint64_t currentId;
+            memcpy(&currentId, CURRENT_TABLE_PAGE_BUFFER_A+j, sizeof(currentId));
+            if(currentId != 0){
+                // Row not empty
+                memset(WORKBUFFER_A, 0, PAGE_SIZE);
+                memcpy(WORKBUFFER_A, CURRENT_TABLE_PAGE_BUFFER_A+j, rowSize);
+                int check = verifyConditions(WORKBUFFER_A, columns, conditions, rowSize);
+                if(check == 1){
+                    //Delete row
+                    memset(WORKBUFFER_A,0,rowSize);
+                    memcpy(CURRENT_TABLE_PAGE_BUFFER_A+j,WORKBUFFER_A,rowSize);
+                    pageChanged = true;
+                } else if(check == -1) {
+                    Logger::logError("Comparisons not in correct format");
+                    return;
+                }
+            }
+        }
+
+        if(pageChanged){
+            if(!writeToPage(CURRENT_TABLE_PAGE_BUFFER_A, tableId, i)){
+                Logger::logError("Error in writing changes to disk");
+                return;
+            }
+        }
+    }
+    Logger::logSuccess("Successfully updated table");
+    
 }
 
 condition getCondition(const std::vector< std::string >& currentComparison){
