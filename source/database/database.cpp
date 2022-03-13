@@ -56,8 +56,6 @@ void Database::useDatabase(const std::vector<std::string>& tokens){
     }
 
     CURRENT_DATABASE = dbName;
-    // currentTables.clear();
-    // tableIds.clear();
 
     Logger::logSuccess("current database: "+dbName);
 
@@ -71,25 +69,20 @@ bool Database::isDatabaseChosen(){
     return (CURRENT_DATABASE!="NUL");
 }
 
-bool Database::checkIfTableExists(const std::string& tableName){
+uint64_t Database::getTableId(const std::string& tableName){
     if(!Database::isDatabaseChosen()){
-        return false;
+        return 0;
     }
-    int fd = open((DATABASE_DIRECTORY+CURRENT_DATABASE+"/tables").c_str(), O_RDONLY);
-    if(fd < 0){
-        Logger::logError("Unable to load table info");
-        return false;
-    }
-    uint64_t prevSeek = 8; // nextId takes 8 bytes.
-    uint64_t totRead = 1; // Arbitrary definition
 
-    while(totRead){
+    uint64_t currentPage = 1;
+
+    while(readPage(WORKBUFFER_A, 0, currentPage)){
+
         uint32_t latestLineStart = 0;
-        lseek(fd, prevSeek, SEEK_SET);
-        totRead = readFromFile(fd, WORKBUFFER_A);
 
-        for(int i=0;i<totRead;i++){
-            if(WORKBUFFER_A[i] == '\n') {
+        for(int i=0;i<PAGE_SIZE && WORKBUFFER_A[i] != (char)0;i++){
+            if(WORKBUFFER_A[i] == '<') {
+                std::string idString;
 
                 int32_t lastSpace = latestLineStart;
                 bool matched = true;
@@ -108,21 +101,24 @@ bool Database::checkIfTableExists(const std::string& tableName){
                             matched = false;
                             break;
                         }
+                    } else {
+                        idString += WORKBUFFER_A[j];
                     }
                 }
                 if(matched){
-                    return true;
+                    if(DEBUG == true){
+                        std::cout << "Match found: " << idString << " " << idString.length() << " " << (int)idString[0] << " " << (int)idString[1] << std::endl;
+                    }
+                    return std::stoll(idString);
                 }
 
                 latestLineStart = i+1;
             }
         }
-        prevSeek += latestLineStart;
+        currentPage++;
     }
 
-    close(fd);
-
-    return false;
+    return 0;
 }
 
 const std::vector< std::vector< std::string > > Database::getColumnsOfTable(const std::string& tableName){
@@ -133,22 +129,21 @@ const std::vector< std::vector< std::string > > Database::getColumnsOfTable(cons
         return columns;
     }
 
-    int fd = open((DATABASE_DIRECTORY + CURRENT_DATABASE + "/tables").c_str(), O_RDONLY);
-    if(fd < 0){
-        Logger::logError("Unable to load table info");
-        return columns;
-    }
+    // int fd = open((DATABASE_DIRECTORY + CURRENT_DATABASE + "/tables").c_str(), O_RDONLY);
+    // if(fd < 0){
+    //     Logger::logError("Unable to load table info");
+    //     return columns;
+    // }
 
-    uint64_t prevSeek = 8; // nextId takes 8 bytes.
-    uint64_t totRead = 1; // Arbitrary definition
+    // uint64_t prevSeek = 8; // nextId takes 8 bytes.
+    // uint64_t totRead = 1; // Arbitrary definition
+    uint64_t currentPage = 1;
 
-    while(totRead){
+    while(readPage(WORKBUFFER_A,0,currentPage)){
         uint32_t latestLineStart = 0;
-        lseek(fd, prevSeek, SEEK_SET);
-        totRead = readFromFile(fd, WORKBUFFER_A);
 
-        for(int i=0;i<totRead;i++){
-            if(WORKBUFFER_A[i] == '\n') {
+        for(int i=0;i<PAGE_SIZE;i++){
+            if(WORKBUFFER_A[i] == '<') {
 
                 //match name first
                 int32_t lastSpace = latestLineStart;
@@ -199,10 +194,9 @@ const std::vector< std::vector< std::string > > Database::getColumnsOfTable(cons
                 latestLineStart = i+1;
             }
         }
-        prevSeek += latestLineStart;
-    }
 
-    close(fd);
+        currentPage++;
+    }
 
     return columns;
 }
@@ -230,7 +224,7 @@ void saveDatabase(const std::string &dbName){
 		std::filesystem::create_directories(DATABASE_DIRECTORY+dbName+"/data"); // To store database data
 
 		// Create tables file. Initially it only stores next table id.
-		int fd = open((DATABASE_DIRECTORY+dbName+"/tables").c_str(),O_RDWR | O_CREAT,S_IRUSR|S_IWUSR);
+		int fd = open((DATABASE_DIRECTORY + dbName + "/tables").c_str(),O_RDWR | O_CREAT,S_IRUSR|S_IWUSR);
 		if(DEBUG == true){
 			std::cout<<"File Descriptor: "<<fd<<std::endl;
 		}
@@ -243,8 +237,16 @@ void saveDatabase(const std::string &dbName){
 			return;
 		}
         uint64_t nextTableId = 1;
-        memcpy(WRITE_BUFFER,&nextTableId,8);
-        write(fd,WRITE_BUFFER,8);
+        uint64_t totPages = 1;
+
+        memset(WORKBUFFER_A, 0, PAGE_SIZE);
+        memcpy(WORKBUFFER_A ,&nextTableId, sizeof(nextTableId));
+        memcpy(WORKBUFFER_A + sizeof(nextTableId),&totPages, sizeof(totPages));
+        writeToFile(fd, WORKBUFFER_A);
+
+        lseek(fd,PAGE_SIZE,SEEK_SET);
+        memset(WORKBUFFER_A, 0, PAGE_SIZE);
+        writeToFile(fd, WORKBUFFER_A);
 
 		close(fd);
 

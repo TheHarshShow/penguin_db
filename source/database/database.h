@@ -34,7 +34,7 @@ public:
      */
     static bool isDatabaseChosen();
 
-    static bool checkIfTableExists(const std::string& tableName);
+    static uint64_t getTableId(const std::string& tableName);
 
     static const std::vector< std::vector< std::string > > getColumnsOfTable(const std::string& tableName);
 
