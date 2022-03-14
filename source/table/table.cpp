@@ -25,9 +25,10 @@ std::vector< std::string > getColumnValues(const std::vector<std::string>& token
 bool verifyInsertedColumns(const std::vector< std::string >& values, const std::vector< std::vector< std::string > >& columns);
 std::pair< bool, std::string > saveRow(const std::string& tableName, const std::vector< std::vector< std::string > >& columns, const std::vector< std::string >& columnValues);
 int verifyConditions(char rowBuffer[], const std::vector< std::vector< std::string > >& columns,const std::vector<condition>& conditions, uint32_t rowSize);
-void printQuery(uint64_t fileId, uint32_t rowSize, const std::vector< std::vector< std::string > >& columns);
+void printQuery(uint64_t fileId, uint32_t rowSize, const std::vector< std::vector< std::string > >& columns, bool atLeastOneMatch = true);
 condition getCondition(const std::vector< std::string >& currentComparison);
 bool updateRow(char BUFFER[], const std::vector< condition >& assignments, const std::vector< std::vector< std::string > >& columns);
+void consolidate(uint64_t fileId, uint32_t rowSize);
 
 COMPARISON stringToComparison(const std::string& comp){
     if(comp == "=="){
@@ -276,6 +277,7 @@ void Table::handleSelect(const std::vector<std::string>& tokens){
     memcpy(&totPages, TABLE_METADATA_PAGE_BUFFER_A + 8, sizeof(totPages));
 
     uint64_t queryCurrentPage = 0;
+    bool atLeastOneMatch = false;
 
     for(uint64_t i=1; i<=totPages; i++){
         readPage(CURRENT_TABLE_PAGE_BUFFER_A, tableId, i);
@@ -292,7 +294,7 @@ void Table::handleSelect(const std::vector<std::string>& tokens){
                     /**
                      * @todo select filtering
                      */
-
+                    atLeastOneMatch = true;
                     if(ptr + queryRowSize - 1 >= PAGE_SIZE){
                         
                         if(!writeToPage(WORKBUFFER_B, queryFileId, queryCurrentPage,  O_CREAT, S_IRUSR|S_IWUSR)){
@@ -321,7 +323,7 @@ void Table::handleSelect(const std::vector<std::string>& tokens){
         queryCurrentPage++;
     }
 
-    printQuery(queryFileId, queryRowSize, columns);
+    printQuery(queryFileId, queryRowSize, columns, atLeastOneMatch);
 
 }
 
@@ -496,7 +498,7 @@ void Table::handleDeleteRow(const std::vector<std::string>& tokens){
 
     readPage(TABLE_METADATA_PAGE_BUFFER_A, tableId, 0);
     uint64_t totBytes, totalPages;
-    memcpy(&totalPages, TABLE_METADATA_PAGE_BUFFER_A, sizeof(totBytes));
+    memcpy(&totBytes, TABLE_METADATA_PAGE_BUFFER_A, sizeof(totBytes));
     memcpy(&totalPages, TABLE_METADATA_PAGE_BUFFER_A + sizeof(totBytes), sizeof(totalPages));
 
     for(uint64_t i=1; i<=totalPages; i++){
@@ -515,6 +517,7 @@ void Table::handleDeleteRow(const std::vector<std::string>& tokens){
                     //Delete row
                     memset(WORKBUFFER_A,0,rowSize);
                     memcpy(CURRENT_TABLE_PAGE_BUFFER_A+j,WORKBUFFER_A,rowSize);
+                    totBytes -= rowSize;
                     pageChanged = true;
                 } else if(check == -1) {
                     Logger::logError("Comparisons not in correct format");
@@ -530,8 +533,25 @@ void Table::handleDeleteRow(const std::vector<std::string>& tokens){
             }
         }
     }
-    Logger::logSuccess("Successfully updated table");
     
+    memcpy(TABLE_METADATA_PAGE_BUFFER_A, &totBytes, sizeof(totBytes));
+
+    if(!writeToPage(TABLE_METADATA_PAGE_BUFFER_A, tableId, 0)){
+        Logger::logError("Error in writing back updated metadata");
+        return;
+    }
+
+    consolidate(tableId, rowSize);
+
+    if(DEBUG == true){
+        readPage(TABLE_METADATA_PAGE_BUFFER_A, tableId, 0);
+        uint64_t totBytesEnd;
+        memcpy(&totBytesEnd, TABLE_METADATA_PAGE_BUFFER_A, sizeof(totBytesEnd));
+        std::cout << "Tot bytes after delete: " << totBytesEnd << std::endl;
+    }
+
+    Logger::logSuccess("Successfully updated table");
+
 }
 
 condition getCondition(const std::vector< std::string >& currentComparison){
@@ -666,7 +686,7 @@ COMPARISON getCompResult(std::string lVal, std::string rVal, std::string type){
 
 }
 
-void printQuery(uint64_t fileId, uint32_t rowSize, const std::vector< std::vector< std::string > >& columns){
+void printQuery(uint64_t fileId, uint32_t rowSize, const std::vector< std::vector< std::string > >& columns, bool atLeastOneMatch){
     
     std::cout << Formatter::bold_on;
     for(int i=0; i < columns.size(); i++){
@@ -674,13 +694,16 @@ void printQuery(uint64_t fileId, uint32_t rowSize, const std::vector< std::vecto
     }
     std::cout << Formatter::off << '\n';
 
+    if(!atLeastOneMatch){
+        return;
+    }
+
     memset(WORKBUFFER_C, 0, PAGE_SIZE);
 
     int bytesRead;
     uint32_t currentPage = 0;
 
     while((bytesRead = readPage(WORKBUFFER_C, fileId, currentPage))){
-
         for(int i=0; i<bytesRead; i+=rowSize){
             uint64_t currentId;
             memcpy(&currentId, WORKBUFFER_C+i, 8);
@@ -762,7 +785,7 @@ std::pair< bool, std::string > saveRow(const std::string& tableName, const std::
         std::cout << "Tot Bytes: " << totBytes << " Tot Pages: " << totPages << " Next ID: " << nextId << std::endl;
     }
 
-    if(totPageBytes + rowSize > PAGE_SIZE){
+    if(totPageBytes + rowSize + sizeof(totPageBytes) > PAGE_SIZE){
         // We need a new page
         totPageBytes = rowSize;
         memset(CURRENT_TABLE_PAGE_BUFFER_A, 0, PAGE_SIZE);
@@ -1023,3 +1046,61 @@ bool saveTable(const std::string &tableString, const std::string& tableName, con
 
     return true;
 }
+
+void consolidate(uint64_t fileId, uint32_t rowSize){
+    if(fileId == 0 || fileId >= ((uint64_t)1<<LOG_MAX_TABLES)){
+        return;
+    }
+
+    if(!readPage(TABLE_METADATA_PAGE_BUFFER_A, fileId, 0)){
+        return;
+    }
+    uint64_t totBytes, totPages;
+    memcpy(&totBytes, TABLE_METADATA_PAGE_BUFFER_A, sizeof(totBytes));
+    memcpy(&totPages, TABLE_METADATA_PAGE_BUFFER_A + sizeof(totBytes), sizeof(totPages));
+    if(totPages <= 2 || totPages*PAGE_SIZE <= 2*totBytes){
+        //Consolidate only if relatively large number of pages
+        return;
+    }
+
+    memset(WORKBUFFER_A, 0, PAGE_SIZE);
+    uint64_t p1 = 1;
+    uint32_t ptr = sizeof(uint32_t);
+    for(int i=1;i<=totPages;i++){
+        readPage(CURRENT_TABLE_PAGE_BUFFER_A, fileId, i);
+        for(uint32_t j=4; j+rowSize-1 < PAGE_SIZE; j+=rowSize){
+            uint64_t currentId;
+            memcpy(&currentId, CURRENT_TABLE_PAGE_BUFFER_A+j, sizeof(currentId));
+            if(currentId){
+                //non empty
+                memcpy(WORKBUFFER_A+ptr, CURRENT_TABLE_PAGE_BUFFER_A+j, rowSize);
+                ptr+=rowSize;
+                if(ptr + rowSize - 1 >=PAGE_SIZE){
+                    uint32_t totBytesOccupied = (ptr-sizeof(uint32_t));
+                    memcpy(WORKBUFFER_A, &totBytesOccupied, sizeof(totBytesOccupied));
+
+                    writeToPage(WORKBUFFER_A, fileId, p1);
+                    p1++;
+                    ptr = sizeof(uint32_t);
+                    memset(WORKBUFFER_A, 0, PAGE_SIZE);
+                }
+            }
+        }
+    }
+    if(ptr > sizeof(uint32_t) || p1==1){
+        uint32_t totBytesOccupied = (ptr-sizeof(totBytesOccupied));
+        memcpy(WORKBUFFER_A, &totBytesOccupied, sizeof(totBytesOccupied));
+        writeToPage(WORKBUFFER_A, fileId, p1);
+        p1++;
+        memset(WORKBUFFER_A, 0, PAGE_SIZE);
+    }
+    // p1 is the first unused page after consolidation
+    if(p1>1){
+        p1--;
+    }
+    memcpy(TABLE_METADATA_PAGE_BUFFER_A + sizeof(totBytes), &p1, sizeof(p1));
+    writeToPage(TABLE_METADATA_PAGE_BUFFER_A, fileId, 0);
+    // One page for metadata
+    truncateFile(fileId, p1+1);
+}
+

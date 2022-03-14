@@ -90,6 +90,18 @@ bool writeToPage(char BUFFER[], uint64_t fileId, uint64_t pageNumber, int additi
     return true;
 }
 
+void truncateFile(uint64_t fileId, uint64_t numPages){
+    int fd = getFileDesriptor(fileId, 0, O_WRONLY, 0);
+
+    if(fd < 0){
+        Logger::logError("Error in loading tables metadata file");
+        close(fd);
+        return;
+    }
+
+    ftruncate(fd, numPages*PAGE_SIZE);
+}
+
 int32_t writeToFile(int fd, char BUFFER[], int totWrite){
     memcpy(WRITE_BUFFER, BUFFER, totWrite);
     return write(fd, WRITE_BUFFER, totWrite);
