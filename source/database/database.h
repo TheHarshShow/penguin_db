@@ -36,6 +36,8 @@ public:
 
     static uint64_t getTableId(const std::string& tableName);
 
+    static const std::vector< std::vector< std::string > > getColumnsOfTable(uint64_t tableId);
+
     static const std::vector< std::vector< std::string > > getColumnsOfTable(const std::string& tableName);
 
     // /**

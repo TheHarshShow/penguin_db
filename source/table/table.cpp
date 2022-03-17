@@ -19,11 +19,15 @@
 inline bool validateTableName(const std::string& name);
 std::pair<bool, std::string> validateAndProcessColumns(std::vector< std::vector< std::string > >& columns);
 bool validateColumnName(const std::string& name);
-bool saveTable(const std::string &tableString, const std::string& tableName, const std::vector< std::vector< std::string > >& columns);
+bool saveTableWithId(uint64_t tableId, const std::string& tableString);
+bool saveTableWithName(const std::string& tableName, const std::string &tableString);
 uint32_t getRowSize(const std::vector< std::vector< std::string > > &columns);
 std::vector< std::string > getColumnValues(const std::vector<std::string>& tokens, int startIndex, int endIndex);
 bool verifyInsertedColumns(const std::vector< std::string >& values, const std::vector< std::vector< std::string > >& columns);
-std::pair< bool, std::string > saveRow(const std::string& tableName, const std::vector< std::vector< std::string > >& columns, const std::vector< std::string >& columnValues);
+
+uint32_t loadRowBytes(const std::vector< std::vector< std::string > >& columns, const std::vector< std::string >& columnValues);
+bool saveRow(uint64_t tableId, uint32_t rowSize);
+
 int verifyConditions(char rowBuffer[], const std::vector< std::vector< std::string > >& columns,const std::vector<condition>& conditions, uint32_t rowSize);
 void printQuery(uint64_t fileId, uint32_t rowSize, const std::vector< std::vector< std::string > >& columns, bool atLeastOneMatch = true);
 condition getCondition(const std::vector< std::string >& currentComparison);
@@ -144,7 +148,7 @@ void Table::createTable(const std::vector<std::string>& tokens){
      * 
      */
     tableString = tableName + tableString;
-    if(!saveTable(tableString, tableName, columns)){
+    if(!saveTableWithName(tableName, tableString)){
         Logger::logError("Unable to write table info");
         return;
     }
@@ -188,14 +192,22 @@ void Table::insertIntoTable(const std::vector<std::string>& tokens){
         return;
     }
 
-    std::pair< bool, std::string > saveInfo = saveRow(tableName, columns, columnValues);
-
-    if(!saveInfo.first){
-        Logger::logError(saveInfo.second);
+    uint64_t tableId = Database::getTableId(tableName);
+    // Load into WORKBUFFER_A
+    uint32_t rowSize = loadRowBytes(columns, columnValues);
+    if(rowSize == 0 || tableId == 0){
+        Logger::logError("Error in loading row info into buffer");
         return;
     }
 
-    Logger::logSuccess(saveInfo.second);
+    bool saveInfo = saveRow(tableId, rowSize);
+
+    if(saveInfo){
+        Logger::logError("Error in saving row info to table");
+        return;
+    }
+
+    Logger::logSuccess("Successfully inserted row");
 
 }
 
@@ -263,7 +275,12 @@ void Table::handleSelect(const std::vector<std::string>& tokens){
     uint64_t timestamp = timeSinceEpochMillisec(); // Query timestamp
     uint64_t queryFileId = ( ( timestamp % ((uint64_t)1 << LOG_MAX_TABLES) ) + ( (uint64_t)1 << LOG_MAX_TABLES) );
 
-    std::string queryFileName = "select__"+std::to_string(timestamp);
+    // Maximum name length is 16
+    std::string queryTableName = "query"+std::to_string(queryFileId%1000000000);
+
+    // Table string for query table
+    std::string queryTableString = std::to_string(queryFileId) + " " + queryTableName + validateAndProcessColumns(columns).second;
+    // saveTableWithId(queryFileId, queryTableString);
 
     memset(WORKBUFFER_B, 0, PAGE_SIZE);
     uint32_t ptr = 0;
@@ -274,7 +291,7 @@ void Table::handleSelect(const std::vector<std::string>& tokens){
 
     readPage(TABLE_METADATA_PAGE_BUFFER_A, tableId, 0);
     uint64_t totPages;
-    memcpy(&totPages, TABLE_METADATA_PAGE_BUFFER_A + 8, sizeof(totPages));
+    memcpy(&totPages, TABLE_METADATA_PAGE_BUFFER_A + sizeof(uint64_t), sizeof(totPages));
 
     uint64_t queryCurrentPage = 0;
     bool atLeastOneMatch = false;
@@ -285,6 +302,7 @@ void Table::handleSelect(const std::vector<std::string>& tokens){
         for(uint32_t j=4; j+rowSize-1<PAGE_SIZE; j+=rowSize){
             uint64_t currentId;
             memcpy(&currentId, CURRENT_TABLE_PAGE_BUFFER_A+j, sizeof(currentId));
+
             if(currentId != 0){
                 // Non empty row
                 memcpy(WORKBUFFER_A, CURRENT_TABLE_PAGE_BUFFER_A+j, rowSize);
@@ -315,8 +333,11 @@ void Table::handleSelect(const std::vector<std::string>& tokens){
         }
     }
 
-    if(ptr){
+    if(DEBUG == true){
+        std::cout << "At least one match: " << atLeastOneMatch << std::endl;
+    }
 
+    if(ptr){
         writeToPage(WORKBUFFER_B, queryFileId, queryCurrentPage, O_CREAT, S_IRUSR|S_IWUSR);
         ptr=0;
         memset(WORKBUFFER_B, 0, PAGE_SIZE);
@@ -724,36 +745,11 @@ void printQuery(uint64_t fileId, uint32_t rowSize, const std::vector< std::vecto
     }
 }
 
-/**
- * @brief Save row to the database
- * 
- * @param tableName Name of the table into which the row is inserted
- * @param columns column metadata of the table
- * @param columnValues values of the row
- * @return std::pair< bool, std::string > bool for whether it worked or not. string stores the message
- */
-std::pair< bool, std::string > saveRow(const std::string& tableName, const std::vector< std::vector< std::string > >& columns, const std::vector< std::string >& columnValues){
-    std::string dbName = Database::getCurrentDatabase();
-
-    uint64_t tableId = Database::getTableId(tableName);
-
-    int fd = open((DATABASE_DIRECTORY + dbName + "/data/table__" + std::to_string(tableId)).c_str(), O_RDWR);
-    if(fd < 0){
-        close(fd);
-        return std::make_pair(false, "Can't open table data file");
-    }
-    
-    readFromFile(fd,TABLE_METADATA_PAGE_BUFFER_A);
-
-    uint64_t totBytes, totPages, nextId;
-    memcpy(&totBytes, TABLE_METADATA_PAGE_BUFFER_A, sizeof(totBytes));
-    memcpy(&totPages, TABLE_METADATA_PAGE_BUFFER_A + sizeof(totBytes), sizeof(totPages));
-    memcpy(&nextId, TABLE_METADATA_PAGE_BUFFER_A + sizeof(totBytes) + sizeof(totPages), sizeof(nextId));
-
+uint32_t loadRowBytes(const std::vector< std::vector< std::string > >& columns, const std::vector< std::string >& columnValues){
     memset(WORKBUFFER_A, 0, PAGE_SIZE);
-    memcpy(WORKBUFFER_A, &nextId, sizeof(nextId));
 
-    uint32_t ptr = sizeof(nextId);
+    // First 8 bytes are reserved for nextId
+    uint32_t ptr = sizeof(uint64_t);
 
     for(int i=0; i<columnValues.size(); i++){
         std::string bytes = getBytesFromValue(columnValues[i], columns[i][1]);
@@ -763,7 +759,6 @@ std::pair< bool, std::string > saveRow(const std::string& tableName, const std::
         if(DEBUG == true){
             std::cout << "BYTES: " << bytes.length() << std::endl;
         }
-
     }
 
     uint32_t rowSize = getRowSize(columns);
@@ -771,12 +766,27 @@ std::pair< bool, std::string > saveRow(const std::string& tableName, const std::
         if(DEBUG == true){
             std::cout << ptr << " " << rowSize << std::endl;
         }
-        return std::make_pair(false, "Row size doesn't match");
+        return 0;
     }
 
+    return rowSize;
+}
+
+bool saveRow(uint64_t tableId, uint32_t rowSize){
+    std::string dbName = Database::getCurrentDatabase();
+    
+    readPage(TABLE_METADATA_PAGE_BUFFER_A, tableId, 0);
+
+    uint64_t totBytes, totPages, nextId;
+    memcpy(&totBytes, TABLE_METADATA_PAGE_BUFFER_A, sizeof(totBytes));
+    memcpy(&totPages, TABLE_METADATA_PAGE_BUFFER_A + sizeof(totBytes), sizeof(totPages));
+    memcpy(&nextId, TABLE_METADATA_PAGE_BUFFER_A + sizeof(totBytes) + sizeof(totPages), sizeof(nextId));
+
+    // Add ID to loaded row
+    memcpy(WORKBUFFER_A, &nextId, sizeof(nextId));
+
     // Read last page
-    lseek(fd, totPages*PAGE_SIZE, SEEK_SET);
-    readFromFile(fd, CURRENT_TABLE_PAGE_BUFFER_A);
+    readPage(CURRENT_TABLE_PAGE_BUFFER_A, tableId, totPages);
 
     uint32_t totPageBytes;
     memcpy(&totPageBytes, CURRENT_TABLE_PAGE_BUFFER_A, sizeof(totPageBytes));
@@ -810,23 +820,19 @@ std::pair< bool, std::string > saveRow(const std::string& tableName, const std::
         }
     }
 
-    lseek(fd, totPages*PAGE_SIZE, SEEK_SET);
-    writeToFile(fd, CURRENT_TABLE_PAGE_BUFFER_A);
+    writeToPage(CURRENT_TABLE_PAGE_BUFFER_A, tableId, totPages);
 
     memcpy(TABLE_METADATA_PAGE_BUFFER_A, &totBytes, sizeof(totBytes));
     memcpy(TABLE_METADATA_PAGE_BUFFER_A + sizeof(totBytes), &totPages, sizeof(totPages));
     memcpy(TABLE_METADATA_PAGE_BUFFER_A + sizeof(totBytes) + sizeof(totPages), &nextId, sizeof(nextId));
 
-    lseek(fd, 0, SEEK_SET);
-    writeToFile(fd, TABLE_METADATA_PAGE_BUFFER_A);
+    writeToPage(TABLE_METADATA_PAGE_BUFFER_A, tableId, 0);
 
     std::cout << "Tot Bytes in table: " << totBytes << std::endl;
     std::cout << "Tot Pages in Table: " << totPages << std::endl;
     std::cout << "Next ID: " << nextId << std::endl;
 
-    close(fd);
-
-    return std::make_pair(true, "Successfully inserted row");
+    return false;
 }
 
 /**
@@ -941,7 +947,40 @@ bool validateColumnName(const std::string& name){
     return true;
 }
 
-bool saveTable(const std::string &tableString, const std::string& tableName, const std::vector< std::vector< std::string > >& columns){
+/**
+ * @brief Write initial data to table file
+ * Table structure:
+ * 1) One page completely reserved for metadata!
+ * 2) First 8 bytes stores total number of bytes occupied. Second 8 bytes stores total number of pages allocated so far. Third 8 bytes store next unique ID
+ * 2) The rest of the pages store data
+ */
+bool saveTableWithId(uint64_t tableId, const std::string& tableString){
+    
+    memset(WORKBUFFER_A,0,PAGE_SIZE+1);
+    uint64_t totBytes = 0;
+    uint64_t totPages = 1;
+    uint64_t nextId = 1;
+
+    memcpy(WORKBUFFER_A, &totBytes, sizeof(totBytes));
+    memcpy(WORKBUFFER_A + sizeof(totBytes), &totPages, sizeof(totPages));
+    memcpy(WORKBUFFER_A + sizeof(totBytes) + sizeof(totPages), &nextId, sizeof(nextId));
+    strcpy(WORKBUFFER_A + sizeof(totBytes) + sizeof(totPages) + sizeof(nextId), tableString.c_str());
+
+    if(!writeToPage(WORKBUFFER_A, tableId, 0, O_CREAT, S_IRUSR|S_IWUSR)){
+        return false;
+    }
+
+    memset(WORKBUFFER_A,0,PAGE_SIZE);
+    if(!writeToPage(WORKBUFFER_A, tableId, 1)){
+        return false;
+    }
+
+    Logger::logSuccess("Successfully created table with ID: "+ std::to_string(tableId));
+
+    return true;
+}
+
+bool saveTableWithName(const std::string& tableName, const std::string &tableString){
 
     std::string currentDatabase = Database::getCurrentDatabase();
 
@@ -963,6 +1002,7 @@ bool saveTable(const std::string &tableString, const std::string& tableName, con
     memcpy(&totMetadataPages, WORKBUFFER_A + sizeof(currentTableId), sizeof(totMetadataPages));
 
     std::string _tableString = std::to_string(currentTableId) + " " + tableString;
+    std::string _tableNameIdString = std::to_string(currentTableId) + " " + tableName + "<";
 
     if(DEBUG == true){
         std::cout << "Current Table ID: " << currentTableId << std::endl;
@@ -972,20 +1012,21 @@ bool saveTable(const std::string &tableString, const std::string& tableName, con
     /**
      * @brief If the line is too long, it won't fit into the read buffer
      */
-    if(_tableString.length() > PAGE_SIZE){
+    if(_tableString.length() + 3*sizeof(uint64_t) > PAGE_SIZE){
         return false;
     }
 
     memset(WORKBUFFER_B, 0, PAGE_SIZE);
-    if(!readPage(WORKBUFFER_B, 0, totMetadataPages)){
-        return false;
-    }
 
     bool written = false;
     while(true){
-        for(int i=0; i<PAGE_SIZE - ((int)_tableString.length() - 1); i++){
+        if(!readPage(WORKBUFFER_B, 0, totMetadataPages)){
+            return false;
+        }
+
+        for(int i=0; i<PAGE_SIZE - ((int)_tableNameIdString.length() - 1); i++){
             if(WORKBUFFER_B[i] == (char)0){
-                strcpy(WORKBUFFER_B + i, _tableString.c_str());
+                strcpy(WORKBUFFER_B + i, _tableNameIdString.c_str());
                 if(DEBUG == true){
                     std::cout << "copied at index: " << i << " " << WORKBUFFER_B[i] << std::endl;
                 }
@@ -1016,35 +1057,8 @@ bool saveTable(const std::string &tableString, const std::string& tableName, con
         return false;
     }
 
-    /**
-     * @brief Write initial data to table file
-     * Table structure:
-     * 1) One page completely reserved for metadata!
-     * 2) First 8 bytes stores total number of bytes occupied. Second 8 bytes stores total number of pages allocated so far. Third 8 bytes store next unique ID
-     * 2) The rest of the pages store data
-     */
+    return saveTableWithId(currentTableId, _tableString);
 
-    memset(WORKBUFFER_A,0,PAGE_SIZE+1);
-    uint64_t totBytes = 0;
-    uint64_t totPages = 1;
-    uint64_t nextId = 1;
-
-    memcpy(WORKBUFFER_A, &totBytes, sizeof(totBytes));
-    memcpy(WORKBUFFER_A + sizeof(totBytes), &totPages, sizeof(totBytes));
-    memcpy(WORKBUFFER_A + sizeof(totBytes) + sizeof(totPages), &nextId, sizeof(totBytes));
-
-    if(!writeToPage(WORKBUFFER_A, currentTableId, 0, O_CREAT, S_IRUSR|S_IWUSR)){
-        return false;
-    }
-
-    memset(WORKBUFFER_A,0,PAGE_SIZE);
-    if(!writeToPage(WORKBUFFER_A, currentTableId, 1)){
-        return false;
-    }
-
-    Logger::logSuccess("Successfully created table with name: "+ tableName);
-
-    return true;
 }
 
 void consolidate(uint64_t fileId, uint32_t rowSize){
@@ -1104,3 +1118,18 @@ void consolidate(uint64_t fileId, uint32_t rowSize){
     truncateFile(fileId, p1+1);
 }
 
+/**
+ * 
+ * @deprecated Replaced by other save row function
+ * @brief Save row to the database
+ * 
+ * @param tableName Name of the table into which the row is inserted
+ * @param columns column metadata of the table
+ * @param columnValues values of the row
+ * @return bool for whether it worked or not
+ */
+bool saveRow(const std::string& tableName, const std::vector< std::vector< std::string > >& columns, const std::vector< std::string >& columnValues){
+    uint64_t tableId = Database::getTableId(tableName);
+    uint32_t rowSize = getRowSize(columns);
+    return saveRow(tableId, rowSize);
+}

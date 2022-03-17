@@ -70,6 +70,7 @@ bool Database::isDatabaseChosen(){
 }
 
 uint64_t Database::getTableId(const std::string& tableName){
+
     if(!Database::isDatabaseChosen()){
         return 0;
     }
@@ -87,24 +88,25 @@ uint64_t Database::getTableId(const std::string& tableName){
                 int32_t lastSpace = latestLineStart;
                 bool matched = true;
                 for(int j=latestLineStart; j<i; j++){
-                    //Firse space represents end of id
                     if(WORKBUFFER_A[j]==' '){
-                        if(lastSpace - latestLineStart){
-                            if(j - lastSpace != tableName.length()){
-                                matched = false;
-                            }
-                            break;
-                        }
                         lastSpace = j + 1;
-                    } else if(lastSpace - latestLineStart){
-                        if(tableName.length() <= j-lastSpace || tableName[j - lastSpace] != WORKBUFFER_A[j]){
-                            matched = false;
-                            break;
-                        }
+                        break;
                     } else {
                         idString += WORKBUFFER_A[j];
                     }
                 }
+
+                if(tableName.length() != i-lastSpace){
+                    matched = false;
+                }
+
+                for(int j=lastSpace; j<i; j++){
+                    if(tableName[j - lastSpace] != WORKBUFFER_A[j]){
+                        matched = false;
+                        break;
+                    }
+                }
+                
                 if(matched){
                     if(DEBUG == true){
                         std::cout << "Match found: " << idString << " " << idString.length() << " " << (int)idString[0] << " " << (int)idString[1] << std::endl;
@@ -121,89 +123,72 @@ uint64_t Database::getTableId(const std::string& tableName){
     return 0;
 }
 
-const std::vector< std::vector< std::string > > Database::getColumnsOfTable(const std::string& tableName){
-
+const std::vector< std::vector< std::string > > Database::getColumnsOfTable(uint64_t tableId){
+    
     std::vector< std::vector <std::string > > columns;
 
     if(!Database::isDatabaseChosen()){
         return columns;
     }
 
-    // int fd = open((DATABASE_DIRECTORY + CURRENT_DATABASE + "/tables").c_str(), O_RDONLY);
-    // if(fd < 0){
-    //     Logger::logError("Unable to load table info");
-    //     return columns;
-    // }
+    if(!tableId){
+        return columns;
+    }
+    memset(WORKBUFFER_A, 0, PAGE_SIZE);
+    if(!readPage(WORKBUFFER_A, tableId, 0)){
+        return columns;
+    }
 
-    // uint64_t prevSeek = 8; // nextId takes 8 bytes.
-    // uint64_t totRead = 1; // Arbitrary definition
-    uint64_t currentPage = 1;
+    uint32_t dataStart = 3*sizeof(uint64_t);
+    uint8_t numSpaces = 0;
+    uint32_t lastSpace = dataStart;
 
-    while(readPage(WORKBUFFER_A,0,currentPage)){
-        uint32_t latestLineStart = 0;
-
-        for(int i=0;i<PAGE_SIZE;i++){
-            if(WORKBUFFER_A[i] == '<') {
-
-                //match name first
-                int32_t lastSpace = latestLineStart;
-                bool matched = true;
-                for(int j=latestLineStart; j<i; j++){
-                    //Firse space represents end of id
-                    if(WORKBUFFER_A[j]==' '){
-                        if(lastSpace - latestLineStart){
-                            if(j - lastSpace != tableName.length()){
-                                matched = false;
-                            }
-                            lastSpace = j + 1;
-                            break;
-                        }
-                        lastSpace = j + 1;
-                    } else if(lastSpace - latestLineStart){
-
-                        if(tableName.length() <= j-lastSpace || tableName[j - lastSpace] != WORKBUFFER_A[j]){
-                            matched = false;
-                            break;
-                        }
+    for(int i=dataStart; i < PAGE_SIZE; i++){
+        if(WORKBUFFER_A[i] == '<'){
+            // process columns
+            std::vector< std::string > currentColumn;
+            std::string word;
+            for(int j=lastSpace; j<i; j++){
+                if(WORKBUFFER_A[j] == '$'){
+                    //Column end
+                    currentColumn.push_back(word);
+                    columns.push_back(currentColumn);
+                    currentColumn.clear();
+                    word = "";
+                } else if(WORKBUFFER_A[j] == ' '){
+                    if(word.size()){
+                        currentColumn.push_back(word);
+                        word = "";
                     }
+                } else {
+                    word+=WORKBUFFER_A[j];
                 }
-                if(matched){
-
-                    // process columns
-                    std::vector< std::string > currentColumn;
-                    std::string word;
-                    for(int j=lastSpace; j<i; j++){
-                        if(WORKBUFFER_A[j] == '$'){
-                            //Column end
-                            currentColumn.push_back(word);
-                            columns.push_back(currentColumn);
-                            currentColumn.clear();
-                            word = "";
-                        } else if(WORKBUFFER_A[j] == ' '){
-                            if(word.size()){
-                                currentColumn.push_back(word);
-                                word = "";
-                            }
-                        } else {
-                            word+=WORKBUFFER_A[j];
-                        }
-                    }
-                    return columns;
-                }
-
-                latestLineStart = i+1;
+            }
+            return columns;
+        } else if(WORKBUFFER_A[i] == ' '){
+            if(numSpaces == 0){
+                lastSpace = i+1;
+                numSpaces++;
+            } else if(numSpaces == 1){
+                lastSpace = i+1;
+                numSpaces++;
             }
         }
-
-        currentPage++;
     }
 
     return columns;
+
+}
+
+const std::vector< std::vector< std::string > > Database::getColumnsOfTable(const std::string& tableName){
+    uint64_t tableId = getTableId(tableName);
+    return getColumnsOfTable(tableId);
 }
 
 bool validateDatabaseName(const std::string& name){
-    if(name.length()<4 || name.length()>16)
+    if(name.length()<4 || name.length()>16){
         return false;
+    }
     
     if(name[0]>='0' && name[0]<='9'){
         return false;
