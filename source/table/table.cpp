@@ -24,12 +24,10 @@ bool saveTableWithName(const std::string& tableName, const std::string &tableStr
 uint32_t getRowSize(const std::vector< std::vector< std::string > > &columns);
 std::vector< std::string > getColumnValues(const std::vector<std::string>& tokens, int startIndex, int endIndex);
 bool verifyInsertedColumns(const std::vector< std::string >& values, const std::vector< std::vector< std::string > >& columns);
-
 uint32_t loadRowBytes(const std::vector< std::vector< std::string > >& columns, const std::vector< std::string >& columnValues);
-bool saveRow(uint64_t tableId, uint32_t rowSize);
-
+bool saveRow(uint64_t tableId, uint32_t rowSize, char* BUFFER = WORKBUFFER_A);
 int verifyConditions(char rowBuffer[], const std::vector< std::vector< std::string > >& columns,const std::vector<condition>& conditions, uint32_t rowSize);
-void printQuery(uint64_t fileId, uint32_t rowSize, const std::vector< std::vector< std::string > >& columns, bool atLeastOneMatch = true);
+void printQuery(uint64_t fileId, bool atLeastOneMatch);
 condition getCondition(const std::vector< std::string >& currentComparison);
 bool updateRow(char BUFFER[], const std::vector< condition >& assignments, const std::vector< std::vector< std::string > >& columns);
 void consolidate(uint64_t fileId, uint32_t rowSize);
@@ -229,8 +227,6 @@ void Table::handleSelect(const std::vector<std::string>& tokens){
 
     std::vector< std::vector< std::string > > columns = Database::getColumnsOfTable(tableName);
     uint32_t rowSize = getRowSize(columns);
-    // Change when handling select
-    uint32_t queryRowSize = rowSize;
 
     std::string dbName = Database::getCurrentDatabase();
 
@@ -280,20 +276,16 @@ void Table::handleSelect(const std::vector<std::string>& tokens){
 
     // Table string for query table
     std::string queryTableString = std::to_string(queryFileId) + " " + queryTableName + validateAndProcessColumns(columns).second;
-    // saveTableWithId(queryFileId, queryTableString);
+    saveTableWithId(queryFileId, queryTableString);
 
     memset(WORKBUFFER_B, 0, PAGE_SIZE);
-    uint32_t ptr = 0;
 
     uint64_t tableId = Database::getTableId(tableName);
-
-    // int fd2 = open((QUERY_DIRECTORY+dbName+queryFileName).c_str(), O_CREAT | O_RDWR | O_APPEND, S_IRUSR|S_IWUSR);
 
     readPage(TABLE_METADATA_PAGE_BUFFER_A, tableId, 0);
     uint64_t totPages;
     memcpy(&totPages, TABLE_METADATA_PAGE_BUFFER_A + sizeof(uint64_t), sizeof(totPages));
 
-    uint64_t queryCurrentPage = 0;
     bool atLeastOneMatch = false;
 
     for(uint64_t i=1; i<=totPages; i++){
@@ -309,22 +301,26 @@ void Table::handleSelect(const std::vector<std::string>& tokens){
                 int check = verifyConditions(WORKBUFFER_A, columns, conditions, rowSize);
 
                 if(check == 1){
-                    /**
-                     * @todo select filtering
-                     */
+                    
                     atLeastOneMatch = true;
-                    if(ptr + queryRowSize - 1 >= PAGE_SIZE){
+                    memcpy(WORKBUFFER_C, WORKBUFFER_A, rowSize);
+                    
+                    // Id will be set by saveRow
+                    memset(WORKBUFFER_C, 0, sizeof(currentId));
+                    saveRow(queryFileId, rowSize, WORKBUFFER_C);
+
+                    // if(ptr + queryRowSize - 1 >= PAGE_SIZE){
                         
-                        if(!writeToPage(WORKBUFFER_B, queryFileId, queryCurrentPage,  O_CREAT, S_IRUSR|S_IWUSR)){
-                            Logger::logError("Error in writing to query file");
-                            return;
-                        }
-                        ptr=0;
-                        memset(WORKBUFFER_B, 0, PAGE_SIZE);
-                        queryCurrentPage++;
-                    }
-                    memcpy(WORKBUFFER_B + ptr, WORKBUFFER_A, queryRowSize);
-                    ptr += queryRowSize;
+                    //     if(!writeToPage(WORKBUFFER_B, queryFileId, queryCurrentPage,  O_CREAT, S_IRUSR|S_IWUSR)){
+                    //         Logger::logError("Error in writing to query file");
+                    //         return;
+                    //     }
+                    //     ptr=0;
+                    //     memset(WORKBUFFER_B, 0, PAGE_SIZE);
+                    //     queryCurrentPage++;
+                    // }
+                    // memcpy(WORKBUFFER_B + ptr, WORKBUFFER_A, queryRowSize);
+                    // ptr += queryRowSize;
                 } else if(check == -1){
                     Logger::logError("Comparisons not in correct format");
                     return;
@@ -337,14 +333,14 @@ void Table::handleSelect(const std::vector<std::string>& tokens){
         std::cout << "At least one match: " << atLeastOneMatch << std::endl;
     }
 
-    if(ptr){
-        writeToPage(WORKBUFFER_B, queryFileId, queryCurrentPage, O_CREAT, S_IRUSR|S_IWUSR);
-        ptr=0;
-        memset(WORKBUFFER_B, 0, PAGE_SIZE);
-        queryCurrentPage++;
-    }
+    // if(ptr){
+    //     writeToPage(WORKBUFFER_B, queryFileId, queryCurrentPage, O_CREAT, S_IRUSR|S_IWUSR);
+    //     ptr=0;
+    //     memset(WORKBUFFER_B, 0, PAGE_SIZE);
+    //     queryCurrentPage++;
+    // }
 
-    printQuery(queryFileId, queryRowSize, columns, atLeastOneMatch);
+    printQuery(queryFileId, atLeastOneMatch);
 
 }
 
@@ -707,8 +703,11 @@ COMPARISON getCompResult(std::string lVal, std::string rVal, std::string type){
 
 }
 
-void printQuery(uint64_t fileId, uint32_t rowSize, const std::vector< std::vector< std::string > >& columns, bool atLeastOneMatch){
-    
+void printQuery(uint64_t fileId, bool atLeastOneMatch){
+
+    std::vector< std::vector< std::string > > columns = Database::getColumnsOfTable(fileId);
+    uint32_t rowSize = getRowSize(columns);
+
     std::cout << Formatter::bold_on;
     for(int i=0; i < columns.size(); i++){
         std::cout << std::setw(20) << columns[i][0];
@@ -720,12 +719,19 @@ void printQuery(uint64_t fileId, uint32_t rowSize, const std::vector< std::vecto
     }
 
     memset(WORKBUFFER_C, 0, PAGE_SIZE);
+    readPage(TABLE_METADATA_PAGE_BUFFER_A, fileId, 0);
+    uint64_t totPages;
+    memcpy(&totPages, TABLE_METADATA_PAGE_BUFFER_A + sizeof(uint64_t), sizeof(totPages));
 
-    int bytesRead;
-    uint32_t currentPage = 0;
+    uint32_t bytesRead;
 
-    while((bytesRead = readPage(WORKBUFFER_C, fileId, currentPage))){
-        for(int i=0; i<bytesRead; i+=rowSize){
+    for(uint64_t currentPage = 1; currentPage <= totPages; currentPage++){
+        if((bytesRead = readPage(WORKBUFFER_C, fileId, currentPage)) == 0){
+            Logger::logError("Error in reading from query page");
+            return;
+        }
+
+        for(int i=sizeof(uint32_t); i<bytesRead; i+=rowSize){
             uint64_t currentId;
             memcpy(&currentId, WORKBUFFER_C+i, 8);
             if(currentId){
@@ -740,8 +746,6 @@ void printQuery(uint64_t fileId, uint32_t rowSize, const std::vector< std::vecto
                 std::cout << '\n';
             }
         }
-
-        currentPage++;
     }
 }
 
@@ -772,7 +776,7 @@ uint32_t loadRowBytes(const std::vector< std::vector< std::string > >& columns, 
     return rowSize;
 }
 
-bool saveRow(uint64_t tableId, uint32_t rowSize){
+bool saveRow(uint64_t tableId, uint32_t rowSize, char* BUFFER){
     std::string dbName = Database::getCurrentDatabase();
     
     readPage(TABLE_METADATA_PAGE_BUFFER_A, tableId, 0);
@@ -783,7 +787,7 @@ bool saveRow(uint64_t tableId, uint32_t rowSize){
     memcpy(&nextId, TABLE_METADATA_PAGE_BUFFER_A + sizeof(totBytes) + sizeof(totPages), sizeof(nextId));
 
     // Add ID to loaded row
-    memcpy(WORKBUFFER_A, &nextId, sizeof(nextId));
+    memcpy(BUFFER, &nextId, sizeof(nextId));
 
     // Read last page
     readPage(CURRENT_TABLE_PAGE_BUFFER_A, tableId, totPages);
@@ -800,7 +804,7 @@ bool saveRow(uint64_t tableId, uint32_t rowSize){
         totPageBytes = rowSize;
         memset(CURRENT_TABLE_PAGE_BUFFER_A, 0, PAGE_SIZE);
         memcpy(CURRENT_TABLE_PAGE_BUFFER_A, &totPageBytes, sizeof(totPageBytes));
-        memcpy(CURRENT_TABLE_PAGE_BUFFER_A + sizeof(totPageBytes), WORKBUFFER_A, rowSize);
+        memcpy(CURRENT_TABLE_PAGE_BUFFER_A + sizeof(totPageBytes), BUFFER, rowSize);
         totPages++;
         nextId++;
         totBytes += rowSize;
@@ -810,7 +814,7 @@ bool saveRow(uint64_t tableId, uint32_t rowSize){
             memcpy(&currentId, CURRENT_TABLE_PAGE_BUFFER_A+i, sizeof(currentId));
             if(currentId == 0){
                 //Empty position
-                memcpy(CURRENT_TABLE_PAGE_BUFFER_A + i, WORKBUFFER_A, rowSize);
+                memcpy(CURRENT_TABLE_PAGE_BUFFER_A + i, BUFFER, rowSize);
                 totPageBytes += rowSize;
                 nextId++;
                 totBytes += rowSize;
@@ -1132,4 +1136,45 @@ bool saveRow(const std::string& tableName, const std::vector< std::vector< std::
     uint64_t tableId = Database::getTableId(tableName);
     uint32_t rowSize = getRowSize(columns);
     return saveRow(tableId, rowSize);
+}
+
+/**
+ * @deprecated Replaced by the other printQuery function
+ */
+void printQuery(uint64_t fileId, uint32_t rowSize, const std::vector< std::vector< std::string > >& columns, bool atLeastOneMatch){
+    
+    std::cout << Formatter::bold_on;
+    for(int i=0; i < columns.size(); i++){
+        std::cout << std::setw(20) << columns[i][0];
+    }
+    std::cout << Formatter::off << '\n';
+
+    if(!atLeastOneMatch){
+        return;
+    }
+
+    memset(WORKBUFFER_C, 0, PAGE_SIZE);
+
+    int bytesRead;
+    uint32_t currentPage = 0;
+
+    while((bytesRead = readPage(WORKBUFFER_C, fileId, currentPage))){
+        for(int i=0; i<bytesRead; i+=rowSize){
+            uint64_t currentId;
+            memcpy(&currentId, WORKBUFFER_C+i, 8);
+            if(currentId){
+                // Row not empty. Process row
+                uint32_t offset = 8;
+                for(int j=0; j<columns.size();j++){
+                    uint32_t sz = getTypeSize(columns[j][1]);
+                    std::string printVal = getValueFromBytes(WORKBUFFER_C, columns[j][1], i + offset, i + offset + sz);
+                    offset += sz;
+                    std::cout << std::setw(20) << printVal ;
+                }
+                std::cout << '\n';
+            }
+        }
+
+        currentPage++;
+    }
 }
