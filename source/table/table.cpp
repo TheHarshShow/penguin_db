@@ -20,6 +20,9 @@ inline bool validateTableName(const std::string& name);
 std::pair<bool, std::string> validateAndProcessColumns(std::vector< std::vector< std::string > >& columns);
 bool validateColumnName(const std::string& name);
 bool saveTableWithId(uint64_t tableId, const std::string& tableString);
+uint64_t handleWhere(uint64_t tableId, const std::vector< std::string >& tokens);
+uint64_t handleSelect(const std::vector<std::string>& tokens);
+
 bool saveTableWithName(const std::string& tableName, const std::string &tableString);
 uint32_t getRowSize(const std::vector< std::vector< std::string > > &columns);
 std::vector< std::string > getColumnValues(const std::vector<std::string>& tokens, int startIndex, int endIndex);
@@ -209,10 +212,7 @@ void Table::insertIntoTable(const std::vector<std::string>& tokens){
 
 }
 
-void Table::handleSelect(const std::vector<std::string>& tokens){
-    /**
-     * @todo Add support for join etc.
-     */
+void Table::handleSearchQuery(const std::vector<std::string>& tokens){
     std::string tableName = tokens[3];
 
     if(!Database::isDatabaseChosen()){
@@ -220,57 +220,116 @@ void Table::handleSelect(const std::vector<std::string>& tokens){
         return;
     }
 
-    if(!Database::getTableId(tableName)){
+    uint64_t currentFileId = Database::getTableId(tableName);
+
+    if(DEBUG == true){
+        readPage(CURRENT_TABLE_PAGE_BUFFER_A, currentFileId, 1);
+        uint32_t rowSize = getRowSize(Database::getColumnsOfTable(currentFileId));
+        std::cout << "IDs of table: " << std::endl;
+        for(int j=4; j<PAGE_SIZE; j+=rowSize){
+            uint64_t currentId;
+            memcpy(&currentId, CURRENT_TABLE_PAGE_BUFFER_A + j, sizeof(uint64_t));
+            if(currentId){
+                std::cout << currentId << " " << j << std::endl;
+            }
+        }
+    }
+
+    if(!currentFileId){
         Logger::logError("Table does not exist");
         return;
     }
 
-    std::vector< std::vector< std::string > > columns = Database::getColumnsOfTable(tableName);
-    uint32_t rowSize = getRowSize(columns);
+    std::set< std::string > mainKeywords = {
+        "join",
+        "where"
+    };
 
-    std::string dbName = Database::getCurrentDatabase();
+    std::vector< std::vector< std::string > > subQueries;
+    std::vector< std::string > currentSubQuery;
 
-    std::vector<condition> conditions;
-
-    if(tokens.size()>4){
-        if(tokens[4] == "where"){
-            std::vector< std::string > currentCondition;
-            for(int i=5; i<tokens.size(); i++){
-                if(tokens[i] == "and" || tokens[i] == "&&"){
-                    if(currentCondition.size() == 0){
-                        Logger::logError("empty condition found");
-                        return;
-                    }
-                    condition cd = getCondition(currentCondition);
-                    currentCondition.clear();
-                    if(cd.operation == COMPARISON::INVALID){
-                        Logger::logError("Invalid condition provided");
-                        return;
-                    }
-                    conditions.push_back(cd);
-                } else {
-                    currentCondition.push_back(tokens[i]);
-                }
+    for(int i=4; i < tokens.size(); i++){
+        if(mainKeywords.find(tokens[i]) != mainKeywords.end()){
+            if(currentSubQuery.size()){
+                subQueries.push_back(currentSubQuery);
+                currentSubQuery.clear();
             }
-            if(!currentCondition.size()){
-                Logger::logError("Empty condition provided");
+        }
+        currentSubQuery.push_back(tokens[i]);
+    }
+
+    if(currentSubQuery.size()){
+        subQueries.push_back(currentSubQuery);
+        currentSubQuery.clear();
+    }
+
+    for(int i=0; i<subQueries.size(); i++){
+        if(subQueries[i][0] == "where"){
+            currentFileId = handleWhere(currentFileId, subQueries[i]);
+            if(DEBUG == true){
+                std::cout << "Table ID of where result: " << currentFileId << std::endl;
+            }
+            if(!currentFileId){
                 return;
             }
-            condition cd = getCondition(currentCondition);
-            if(cd.operation == COMPARISON::INVALID){
-                Logger::logError("Invalid condition provided");
-                return;
-            }
-            conditions.push_back(cd);
-        } else {
-            Logger::logError("Only where clause supported now");
+        } else if(subQueries[i][0] == "join") {
+            Logger::logError("Join query support to be added in the future");
             return;
         }
     }
 
+    // For now, we don't care about atLeastOneMatched. That efficiency requirement can be added later
+    printQuery(currentFileId, true);
+}
+
+uint64_t handleWhere(uint64_t tableId, const std::vector< std::string >& tokens){
+    
+    if(DEBUG == true){
+        std::cout << "Where clause tokens: ";
+        for(int i=0;i<tokens.size();i++){
+            std::cout << tokens[i] << " ";
+        }
+        std::cout << std::endl;
+    }
+
+    std::vector< std::vector< std::string > > columns = Database::getColumnsOfTable(tableId);
+    uint32_t rowSize = getRowSize(columns);
+
+    std::vector<condition> conditions;
+    std::vector< std::string > currentCondition;
+
+    // 0th token in where
+    for(int i=1; i<tokens.size(); i++){
+        if(tokens[i] == "and" || tokens[i] == "&&"){
+            if(currentCondition.size() == 0){
+                Logger::logError("empty condition found");
+                return 0;
+            }
+            condition cd = getCondition(currentCondition);
+            currentCondition.clear();
+            if(cd.operation == COMPARISON::INVALID){
+                Logger::logError("Invalid condition provided");
+                return 0;
+            }
+            conditions.push_back(cd);
+        } else {
+            currentCondition.push_back(tokens[i]);
+        }
+    }
+    if(!currentCondition.size()){
+        Logger::logError("Empty condition provided");
+        return 0;
+    }
+    condition cd = getCondition(currentCondition);
+    if(cd.operation == COMPARISON::INVALID){
+        Logger::logError("Invalid condition provided");
+        return 0;
+    }
+    conditions.push_back(cd);
+
     uint64_t timestamp = timeSinceEpochMillisec(); // Query timestamp
     uint64_t queryFileId = ( ( timestamp % ((uint64_t)1 << LOG_MAX_TABLES) ) + ( (uint64_t)1 << LOG_MAX_TABLES) );
-
+    
     // Maximum name length is 16
     std::string queryTableName = "query"+std::to_string(queryFileId%1000000000);
 
@@ -279,13 +338,9 @@ void Table::handleSelect(const std::vector<std::string>& tokens){
     saveTableWithId(queryFileId, queryTableString);
 
     memset(WORKBUFFER_B, 0, PAGE_SIZE);
-
-    uint64_t tableId = Database::getTableId(tableName);
-
     readPage(TABLE_METADATA_PAGE_BUFFER_A, tableId, 0);
     uint64_t totPages;
     memcpy(&totPages, TABLE_METADATA_PAGE_BUFFER_A + sizeof(uint64_t), sizeof(totPages));
-
     bool atLeastOneMatch = false;
 
     for(uint64_t i=1; i<=totPages; i++){
@@ -305,25 +360,13 @@ void Table::handleSelect(const std::vector<std::string>& tokens){
                     atLeastOneMatch = true;
                     memcpy(WORKBUFFER_C, WORKBUFFER_A, rowSize);
                     
-                    // Id will be set by saveRow
+                    // ID will be set by saveRow
                     memset(WORKBUFFER_C, 0, sizeof(currentId));
                     saveRow(queryFileId, rowSize, WORKBUFFER_C);
 
-                    // if(ptr + queryRowSize - 1 >= PAGE_SIZE){
-                        
-                    //     if(!writeToPage(WORKBUFFER_B, queryFileId, queryCurrentPage,  O_CREAT, S_IRUSR|S_IWUSR)){
-                    //         Logger::logError("Error in writing to query file");
-                    //         return;
-                    //     }
-                    //     ptr=0;
-                    //     memset(WORKBUFFER_B, 0, PAGE_SIZE);
-                    //     queryCurrentPage++;
-                    // }
-                    // memcpy(WORKBUFFER_B + ptr, WORKBUFFER_A, queryRowSize);
-                    // ptr += queryRowSize;
                 } else if(check == -1){
                     Logger::logError("Comparisons not in correct format");
-                    return;
+                    return 0;
                 }
             }
         }
@@ -333,14 +376,7 @@ void Table::handleSelect(const std::vector<std::string>& tokens){
         std::cout << "At least one match: " << atLeastOneMatch << std::endl;
     }
 
-    // if(ptr){
-    //     writeToPage(WORKBUFFER_B, queryFileId, queryCurrentPage, O_CREAT, S_IRUSR|S_IWUSR);
-    //     ptr=0;
-    //     memset(WORKBUFFER_B, 0, PAGE_SIZE);
-    //     queryCurrentPage++;
-    // }
-
-    printQuery(queryFileId, atLeastOneMatch);
+    return queryFileId;
 
 }
 
@@ -779,21 +815,21 @@ uint32_t loadRowBytes(const std::vector< std::vector< std::string > >& columns, 
 bool saveRow(uint64_t tableId, uint32_t rowSize, char* BUFFER){
     std::string dbName = Database::getCurrentDatabase();
     
-    readPage(TABLE_METADATA_PAGE_BUFFER_A, tableId, 0);
+    readPage(TABLE_METADATA_PAGE_BUFFER_C, tableId, 0);
 
     uint64_t totBytes, totPages, nextId;
-    memcpy(&totBytes, TABLE_METADATA_PAGE_BUFFER_A, sizeof(totBytes));
-    memcpy(&totPages, TABLE_METADATA_PAGE_BUFFER_A + sizeof(totBytes), sizeof(totPages));
-    memcpy(&nextId, TABLE_METADATA_PAGE_BUFFER_A + sizeof(totBytes) + sizeof(totPages), sizeof(nextId));
+    memcpy(&totBytes, TABLE_METADATA_PAGE_BUFFER_C, sizeof(totBytes));
+    memcpy(&totPages, TABLE_METADATA_PAGE_BUFFER_C + sizeof(totBytes), sizeof(totPages));
+    memcpy(&nextId, TABLE_METADATA_PAGE_BUFFER_C + sizeof(totBytes) + sizeof(totPages), sizeof(nextId));
 
     // Add ID to loaded row
     memcpy(BUFFER, &nextId, sizeof(nextId));
 
     // Read last page
-    readPage(CURRENT_TABLE_PAGE_BUFFER_A, tableId, totPages);
+    readPage(CURRENT_TABLE_PAGE_BUFFER_C, tableId, totPages);
 
     uint32_t totPageBytes;
-    memcpy(&totPageBytes, CURRENT_TABLE_PAGE_BUFFER_A, sizeof(totPageBytes));
+    memcpy(&totPageBytes, CURRENT_TABLE_PAGE_BUFFER_C, sizeof(totPageBytes));
 
     if(DEBUG == true){
         std::cout << "Tot Bytes: " << totBytes << " Tot Pages: " << totPages << " Next ID: " << nextId << std::endl;
@@ -802,35 +838,35 @@ bool saveRow(uint64_t tableId, uint32_t rowSize, char* BUFFER){
     if(totPageBytes + rowSize + sizeof(totPageBytes) > PAGE_SIZE){
         // We need a new page
         totPageBytes = rowSize;
-        memset(CURRENT_TABLE_PAGE_BUFFER_A, 0, PAGE_SIZE);
-        memcpy(CURRENT_TABLE_PAGE_BUFFER_A, &totPageBytes, sizeof(totPageBytes));
-        memcpy(CURRENT_TABLE_PAGE_BUFFER_A + sizeof(totPageBytes), BUFFER, rowSize);
+        memset(CURRENT_TABLE_PAGE_BUFFER_C, 0, PAGE_SIZE);
+        memcpy(CURRENT_TABLE_PAGE_BUFFER_C, &totPageBytes, sizeof(totPageBytes));
+        memcpy(CURRENT_TABLE_PAGE_BUFFER_C + sizeof(totPageBytes), BUFFER, rowSize);
         totPages++;
         nextId++;
         totBytes += rowSize;
     } else {
         for(int i=sizeof(totPageBytes); i + rowSize - 1<PAGE_SIZE; i+=rowSize){
             uint64_t currentId;
-            memcpy(&currentId, CURRENT_TABLE_PAGE_BUFFER_A+i, sizeof(currentId));
+            memcpy(&currentId, CURRENT_TABLE_PAGE_BUFFER_C+i, sizeof(currentId));
             if(currentId == 0){
                 //Empty position
-                memcpy(CURRENT_TABLE_PAGE_BUFFER_A + i, BUFFER, rowSize);
+                memcpy(CURRENT_TABLE_PAGE_BUFFER_C + i, BUFFER, rowSize);
                 totPageBytes += rowSize;
                 nextId++;
                 totBytes += rowSize;
-                memcpy(CURRENT_TABLE_PAGE_BUFFER_A, &totPageBytes, sizeof(totPageBytes));
+                memcpy(CURRENT_TABLE_PAGE_BUFFER_C, &totPageBytes, sizeof(totPageBytes));
                 break;
             }
         }
     }
 
-    writeToPage(CURRENT_TABLE_PAGE_BUFFER_A, tableId, totPages);
+    writeToPage(CURRENT_TABLE_PAGE_BUFFER_C, tableId, totPages);
 
-    memcpy(TABLE_METADATA_PAGE_BUFFER_A, &totBytes, sizeof(totBytes));
-    memcpy(TABLE_METADATA_PAGE_BUFFER_A + sizeof(totBytes), &totPages, sizeof(totPages));
-    memcpy(TABLE_METADATA_PAGE_BUFFER_A + sizeof(totBytes) + sizeof(totPages), &nextId, sizeof(nextId));
+    memcpy(TABLE_METADATA_PAGE_BUFFER_C, &totBytes, sizeof(totBytes));
+    memcpy(TABLE_METADATA_PAGE_BUFFER_C + sizeof(totBytes), &totPages, sizeof(totPages));
+    memcpy(TABLE_METADATA_PAGE_BUFFER_C + sizeof(totBytes) + sizeof(totPages), &nextId, sizeof(nextId));
 
-    writeToPage(TABLE_METADATA_PAGE_BUFFER_A, tableId, 0);
+    writeToPage(TABLE_METADATA_PAGE_BUFFER_C, tableId, 0);
 
     std::cout << "Tot Bytes in table: " << totBytes << std::endl;
     std::cout << "Tot Pages in Table: " << totPages << std::endl;
@@ -884,7 +920,7 @@ inline bool validateTableName(const std::string& name){
     if(name[0]>='0' && name[0]<='9'){
         return false;
     }
-
+    
     for(int i=0; i<name.length(); i++){
         if((name[i]<'0' || name[i]>'9') && (name[i]<'a' || name[i]>'z') && (name[i]<'A' || name[i]>'Z')){
             return false;
@@ -1120,4 +1156,122 @@ void consolidate(uint64_t fileId, uint32_t rowSize){
     writeToPage(TABLE_METADATA_PAGE_BUFFER_A, fileId, 0);
     // One page for metadata
     truncateFile(fileId, p1+1);
+}
+
+/**
+ * @deprecated
+ */
+uint64_t handleSelect(const std::vector<std::string>& tokens){
+    std::string tableName = tokens[3];
+
+    std::vector< std::vector< std::string > > columns = Database::getColumnsOfTable(tableName);
+    uint32_t rowSize = getRowSize(columns);
+
+    std::string dbName = Database::getCurrentDatabase();
+
+    std::vector<condition> conditions;
+
+    if(tokens.size()>4){
+
+        /**
+         * @todo Handle Join Later. Do it in a scalable manner.
+         * @todo Add support for 'as' keyword
+         */
+        
+        if(tokens[4] == "where"){
+            std::vector< std::string > currentCondition;
+            for(int i=5; i<tokens.size(); i++){
+                if(tokens[i] == "and" || tokens[i] == "&&"){
+                    if(currentCondition.size() == 0){
+                        Logger::logError("empty condition found");
+                        return 0;
+                    }
+                    condition cd = getCondition(currentCondition);
+                    currentCondition.clear();
+                    if(cd.operation == COMPARISON::INVALID){
+                        Logger::logError("Invalid condition provided");
+                        return 0;
+                    }
+                    conditions.push_back(cd);
+                } else {
+                    currentCondition.push_back(tokens[i]);
+                }
+            }
+            if(!currentCondition.size()){
+                Logger::logError("Empty condition provided");
+                return 0;
+            }
+            condition cd = getCondition(currentCondition);
+            if(cd.operation == COMPARISON::INVALID){
+                Logger::logError("Invalid condition provided");
+                return 0;
+            }
+            conditions.push_back(cd);
+        } else {
+            Logger::logError("Only where clause supported now");
+            return 0;
+        }
+    }
+
+    uint64_t timestamp = timeSinceEpochMillisec(); // Query timestamp
+    uint64_t queryFileId = ( ( timestamp % ((uint64_t)1 << LOG_MAX_TABLES) ) + ( (uint64_t)1 << LOG_MAX_TABLES) );
+
+    // Maximum name length is 16
+    std::string queryTableName = "query"+std::to_string(queryFileId%1000000000);
+
+    // Table string for query table
+    std::string queryTableString = std::to_string(queryFileId) + " " + queryTableName + validateAndProcessColumns(columns).second;
+    saveTableWithId(queryFileId, queryTableString);
+
+    memset(WORKBUFFER_B, 0, PAGE_SIZE);
+
+    uint64_t tableId = Database::getTableId(tableName);
+
+    readPage(TABLE_METADATA_PAGE_BUFFER_A, tableId, 0);
+    uint64_t totPages;
+    memcpy(&totPages, TABLE_METADATA_PAGE_BUFFER_A + sizeof(uint64_t), sizeof(totPages));
+
+    bool atLeastOneMatch = false;
+
+
+    for(uint64_t i=1; i<=totPages; i++){
+        memset(CURRENT_TABLE_PAGE_BUFFER_A, 0, PAGE_SIZE);
+        readPage(CURRENT_TABLE_PAGE_BUFFER_A, tableId, i);
+
+        for(uint32_t j=sizeof(uint32_t); j+rowSize-1<PAGE_SIZE; j+=rowSize){
+            uint64_t currentId;
+            memcpy(&currentId, CURRENT_TABLE_PAGE_BUFFER_A+j, sizeof(currentId));
+
+            if(DEBUG == true){
+                std::cout << "CURRENT ID: " << currentId << " " << j << std::endl;
+            }
+
+            if(currentId != 0){
+
+                // Non empty row
+                memcpy(WORKBUFFER_A, CURRENT_TABLE_PAGE_BUFFER_A+j, rowSize);
+                int check = verifyConditions(WORKBUFFER_A, columns, conditions, rowSize);
+
+                if(check == 1){
+
+                    atLeastOneMatch = true;
+                    memcpy(WORKBUFFER_C, WORKBUFFER_A, rowSize);
+                    
+                    // ID will be set by saveRow
+                    memset(WORKBUFFER_C, 0, sizeof(currentId));
+                    saveRow(queryFileId, rowSize, WORKBUFFER_C);
+
+                } else if(check == -1){
+                    Logger::logError("Comparisons not in correct format");
+                    return 0;
+                }
+            }
+        }
+    }
+
+    if(DEBUG == true){
+        std::cout << "At least one match: " << atLeastOneMatch << std::endl;
+    }
+
+    return queryFileId;
 }

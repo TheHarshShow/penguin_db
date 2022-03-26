@@ -50,7 +50,7 @@ void processCommand(const std::string& command){
 		if(DEBUG == true){
 			std::cout << "select from query observed" << std::endl;
 		}
-		Table::handleSelect(tokens);
+		Table::handleSearchQuery(tokens);
 	} else if(tokens.size()>3 && tokens[0] == "update" && tokens[2] == "set"){
 		if(DEBUG == true){
 			std::cout << "update query observed" << std::endl;

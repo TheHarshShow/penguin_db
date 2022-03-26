@@ -3,11 +3,15 @@
 extern char WRITE_BUFFER[];
 extern char READ_BUFFER[];
 
+// Metadata buffers A and B are for tables being read. C is for table being written.
 extern char TABLE_METADATA_PAGE_BUFFER_A[];
 extern char TABLE_METADATA_PAGE_BUFFER_B[];
+extern char TABLE_METADATA_PAGE_BUFFER_C[];
 
+// Current table page buffers A and B are for tables being read. C is for table being written.
 extern char CURRENT_TABLE_PAGE_BUFFER_A[];
 extern char CURRENT_TABLE_PAGE_BUFFER_B[];
+extern char CURRENT_TABLE_PAGE_BUFFER_C[];
 
 extern char WORKBUFFER_A[];
 extern char WORKBUFFER_B[];
