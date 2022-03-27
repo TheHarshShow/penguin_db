@@ -173,7 +173,7 @@ std::string getBytesFromValue(const std::string& value, const std::string& type)
     }
 }
 
-std::string getValueFromBytes(char buffer[], const std::string& type, int start, int end){
+std::string getValueFromBytes(const char buffer[], const std::string& type, int start, int end){
     TYPE _type = getTypeFromString(type);
 
     int64_t intValue;

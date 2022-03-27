@@ -16,6 +16,8 @@ enum class COMPARISON {
 
 COMPARISON stringToComparison(const std::string& comp);
 COMPARISON getCompResult(std::string lVal, std::string rVal, std::string type);
+COMPARISON getInverseComparison(COMPARISON comp);
+
 bool isComparisonValid(COMPARISON expected, COMPARISON obtained);
 
 struct condition {
@@ -23,6 +25,8 @@ struct condition {
     COMPARISON operation;
     std::string value;
     condition(std::string cName, COMPARISON op, std::string val): columnName(cName), operation(op), value(val) {}
+    void invert();
+    std::string toString();
 };
 
 class Table {

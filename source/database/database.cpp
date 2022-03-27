@@ -123,6 +123,60 @@ uint64_t Database::getTableId(const std::string& tableName){
     return 0;
 }
 
+std::string Database::getTableName(uint64_t tableId){
+    
+    std::string tableName;
+
+    if(!Database::isDatabaseChosen()){
+        return tableName;
+    }
+
+    uint64_t currentPage = 1;
+
+    while(readPage(WORKBUFFER_A, 0, currentPage)){
+
+        uint32_t latestLineStart = 0;
+
+        for(int i=0;i<PAGE_SIZE && WORKBUFFER_A[i] != (char)0;i++){
+            if(WORKBUFFER_A[i] == '<') {
+                std::string idString;
+
+                int32_t lastSpace = latestLineStart;
+                bool matched = true;
+                for(int j=latestLineStart; j<i; j++){
+                    if(WORKBUFFER_A[j]==' '){
+                        lastSpace = j + 1;
+                        break;
+                    } else {
+                        idString += WORKBUFFER_A[j];
+                    }
+                }
+
+                for(int j=lastSpace; j<i; j++){
+                    tableName += WORKBUFFER_A[j];
+                }
+
+                if(std::stoll(idString) != tableId){
+                    tableName.clear();
+                    matched = false;
+                }
+                
+                if(matched){
+                    if(DEBUG == true){
+                        std::cout << "Match found: " << idString << " " << idString.length() << " " << (int)idString[0] << " " << (int)idString[1] << std::endl;
+                    }
+                    return tableName;
+                }
+
+                latestLineStart = i+1;
+            }
+        }
+        currentPage++;
+    }
+
+    return tableName;
+}
+
 const std::vector< std::vector< std::string > > Database::getColumnsOfTable(uint64_t tableId){
     
     std::vector< std::vector <std::string > > columns;
