@@ -3,7 +3,7 @@ SDIR := source
 CC := g++
 CXXFLAGS := -std=c++17 -g -Wall
 
-_OBJS = main.o version.o parse.o logger.o database.o formatter.o table.o type.o buffers.o
+_OBJS = main.o version.o parse.o logger.o database.o formatter.o table.o type.o buffers.o tableV2.o condition.o
 OBJS = $(patsubst %,$(ODIR)/%,$(_OBJS))
 
 penguin: $(OBJS)

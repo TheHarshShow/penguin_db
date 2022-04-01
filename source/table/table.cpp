@@ -37,26 +37,10 @@ uint32_t loadRowBytes(const std::vector< std::vector< std::string > >& columns, 
 bool saveRow(uint64_t tableId, uint32_t rowSize, char* BUFFER = WORKBUFFER_A);
 int verifyConditions(const char rowBuffer[], const std::vector< std::vector< std::string > >& columns,const std::vector<condition>& conditions, uint32_t rowSize);
 void printQuery(uint64_t fileId, bool atLeastOneMatch);
-condition getCondition(const std::vector< std::string >& currentComparison);
 bool updateRow(char BUFFER[], const std::vector< condition >& assignments, const std::vector< std::vector< std::string > >& columns);
 void consolidate(uint64_t fileId, uint32_t rowSize);
 
 uint64_t handleSelect(const std::vector<std::string>& tokens);
-
-COMPARISON stringToComparison(const std::string& comp){
-    if(comp == "=="){
-        return COMPARISON::EQUAL;
-    } else if(comp == ">"){
-        return COMPARISON::GREATER;    
-    } else if(comp == "<"){
-        return COMPARISON::LESS;
-    } else if(comp == "<="){
-        return COMPARISON::L_EQUAL;
-    } else if(comp == ">="){
-        return COMPARISON::G_EQUAL;
-    }
-    return COMPARISON::INVALID;
-}
 
 std::string getQueryString(uint64_t queryFileId){
     universalCounter++;
@@ -82,25 +66,6 @@ std::string comparisonToString(COMPARISON comp){
     }
 }
 
-COMPARISON getInverseComparison(COMPARISON comp){
-    switch(comp){
-        case COMPARISON::EQUAL:
-            return COMPARISON::EQUAL;
-        case COMPARISON::GREATER:
-            return COMPARISON::LESS;
-        case COMPARISON::LESS:
-            return COMPARISON::GREATER;
-        case COMPARISON::G_EQUAL:
-            return COMPARISON::L_EQUAL;
-        case COMPARISON::L_EQUAL:
-            return COMPARISON::G_EQUAL;
-        case COMPARISON::ASSIGNMENT:
-            return COMPARISON::INVALID;
-        default:
-            return COMPARISON::INVALID;
-    }
-}
-
 void condition::invert(){
     swap(columnName, value);
     operation = getInverseComparison(operation);
@@ -112,22 +77,6 @@ std::string condition::toString(){
     str+=comparisonToString(operation);
     str+=value;
     return str;
-}
-
-bool isComparisonValid(COMPARISON expected, COMPARISON obtained){
-    if(expected == COMPARISON::G_EQUAL){
-        if(obtained == COMPARISON::GREATER || obtained == COMPARISON::EQUAL){
-            return true;
-        }
-        return false;
-    }
-    if(expected == COMPARISON::L_EQUAL){
-        if(obtained == COMPARISON::LESS || obtained == COMPARISON::EQUAL){
-            return true;
-        }
-        return false;
-    }
-    return (expected == obtained);
 }
 
 void Table::createTable(const std::vector<std::string>& tokens){
@@ -957,22 +906,6 @@ void Table::handleDeleteRow(const std::vector<std::string>& tokens){
 
 }
 
-condition getCondition(const std::vector< std::string >& currentComparison){
-    if(currentComparison.size()==3 && currentComparison[1] == ">"){
-        return condition(currentComparison[0], COMPARISON::GREATER, currentComparison[2]);
-    } else if(currentComparison.size()==3 && currentComparison[1] == "<"){
-        return condition(currentComparison[0], COMPARISON::LESS, currentComparison[2]);
-    } else if(currentComparison.size()==4 && currentComparison[1] == "=" && currentComparison[2] == "="){
-        return condition(currentComparison[0], COMPARISON::EQUAL, currentComparison[3]);
-    } else if(currentComparison.size()==4 && currentComparison[1] == ">" && currentComparison[2] == "="){
-        return condition(currentComparison[0], COMPARISON::G_EQUAL, currentComparison[3]);
-    } else if(currentComparison.size()==4 && currentComparison[1] == "<" && currentComparison[2] == "="){
-        return condition(currentComparison[0], COMPARISON::L_EQUAL, currentComparison[3]);
-    } else {
-        return condition("",COMPARISON::INVALID,"");
-    }
-}
-
 bool updateRow(char BUFFER[], const std::vector< condition >& assignments, const std::vector< std::vector< std::string > >& columns){
     std::map<std::string, uint32_t> offsets;
     std::map<std::string, uint32_t> sizes;
@@ -1041,53 +974,6 @@ int verifyConditions(const char rowBuffer[], const std::vector< std::vector< std
         }
     }
     return 1;
-}
-
-
-COMPARISON getCompResult(std::string lVal, std::string rVal, std::string type){
-    if(!matchType(lVal, type) || !matchType(rVal, type)){
-        return COMPARISON::INVALID;
-    }
-    TYPE _type = getTypeFromString(type);
-
-    switch(_type){
-        case TYPE::INT:
-            if(stoll(lVal) > stoll(rVal)){
-                return COMPARISON::GREATER;
-            } else if(stoll(lVal) < stoll(rVal)){
-                return COMPARISON::LESS;
-            } else if(stoll(lVal) == stoll(rVal)){
-                return COMPARISON::EQUAL;
-            }
-        case TYPE::FLOAT:
-            if(stod(lVal) > stod(rVal)){
-                return COMPARISON::GREATER;
-            } else if(stod(lVal) < stod(rVal)){
-                return COMPARISON::LESS;
-            } else if(stod(lVal) == stod(rVal)){
-                return COMPARISON::EQUAL;
-            }
-        case TYPE::CHAR:
-            if(lVal[1] > rVal[1]){
-                return COMPARISON::GREATER;
-            } else if(lVal[1] < rVal[0]){
-                return COMPARISON::LESS;
-            } else if(lVal[1] == rVal[0]){
-                return COMPARISON::EQUAL;
-            }
-        case TYPE::STRING:
-            for(int i=0;i<std::min(lVal.size(), rVal.size()); i++){
-                if(lVal[i] > rVal[i]){
-                    return COMPARISON::GREATER;
-                } else if(lVal[i] < rVal[i]){
-                    return COMPARISON::LESS;
-                }
-            }
-            return COMPARISON::EQUAL;
-        default:
-            return COMPARISON::INVALID;
-    }
-
 }
 
 void printQuery(uint64_t fileId, bool atLeastOneMatch){
